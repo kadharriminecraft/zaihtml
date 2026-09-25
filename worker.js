@@ -1,47 +1,60 @@
 /* ============================================================
- * z.ai pocket — Cloudflare Worker reverse proxy
+ * z.ai pocket — Cloudflare Worker reverse proxy (v2)
  * ------------------------------------------------------------
  * WHAT THIS DOES
- *   Makes https://chat.z.ai work from inside a single local HTML
- *   file ("zai-pocket.html"). Every request the real site makes
- *   (HTML, JS/CSS assets, API calls, SSE streams, uploads,
- *   downloads) is answered by THIS worker, which forwards it to
- *   the z.ai family of hosts. The browser never talks to z.ai.
+ *   Open THIS WORKER'S URL in your phone browser — that URL is
+ *   the app. The worker serves the real chat.z.ai full-screen
+ *   (no iframe, no local HTML file). Every request the site
+ *   makes (HTML, JS/CSS assets, API calls, SSE streams,
+ *   uploads, downloads, websockets) is answered by THIS worker,
+ *   which forwards it to the z.ai family of hosts. The browser
+ *   never talks to z.ai directly.
  *
  * DEPLOY (you already have a worker):
  *   1. dash.cloudflare.com → Workers & Pages → your worker
  *   2. "Edit code" / Quick Edit → select all → paste this file
  *   3. Save & Deploy
  *   4. (recommended) Settings → Variables → add PROXY_TOKEN with
- *      a long random string, and put the same string into the
- *      app's settings. Optional: EXTRA_HOSTS="a.com,b.com" to
- *      allowlist additional first-party hosts.
+ *      a long random string. Then open the worker URL once and
+ *      enter that token — it is remembered in a cookie.
+ *      Optional: EXTRA_HOSTS="a.com,b.com" to allowlist more
+ *      first-party hosts.
  *
  * ROUTES
- *   /chat/*            -> https://chat.z.ai/*
+ *   /                  -> https://chat.z.ai/   — the app itself,
+ *                          full-screen, no prefix (the SPA only works
+ *                          at "/"; on /chat/ it renders its own error
+ *                          page). If PROXY_TOKEN is set and not yet
+ *                          satisfied, / shows the token setup page.
+ *   /chat/*            -> 302 to /*            (legacy v2 prefix)
  *   /p/<host>/*        -> https://<host>/*  (host must be allowlisted)
+ *   anything else      -> https://chat.z.ai/<path>  (transparent
+ *                          catch-all: the SPA builds root-absolute
+ *                          URLs at runtime, e.g. /static/logo.png,
+ *                          /user.png — they behave exactly like they
+ *                          do on the real site)
  *   /__status          -> health check JSON
- *   /__clear?names=..  -> expire session cookies (used by the app)
- *   /                  -> landing page
+ *   /__clear           -> wipe all session cookies, back to /
  *
  * SECURITY
  *   - Only z.ai / chatglm.cn / chatglm.site family hosts are
  *     proxied. This is NOT an open proxy.
- *   - With PROXY_TOKEN set, everything except the landing page,
+ *   - With PROXY_TOKEN set, everything except the token page,
  *     /__status and preflights requires the token.
  *   - Upstream cookies are re-issued for this worker's own domain
- *     (SameSite=None; Secure; Partitioned) so they work inside the
- *     app's iframe; the app also mirrors them as a fallback.
+ *     so the whole app is one same-origin page; sessions stick.
  * ============================================================ */
 
-const VERSION = 'zai-pocket-proxy 1.0';
+const VERSION = 'zai-pocket-proxy 2.0';
 
 /* z.ai first-party family (suffix match — covers subdomains) */
 const ALLOW = [
   'z.ai',               // chat.z.ai, zcode.z.ai, *.space-z.ai sandboxes, ...
   'chatglm.cn',         // z-cdn.chatglm.cn (frontend assets), z-cdn-media, cdn-proxy, sdata
   'chatglm.site',       // artifacts-cdn, adapter-prod, test envs
-  'glm-chat.oss-cn-hongkong.aliyuncs.com' // file upload/download bucket
+  'glm-chat.oss-cn-hongkong.aliyuncs.com', // file upload/download bucket
+  'alicdn.com',         // o.alicdn.com — z.ai's shared frontend libs (jquery …)
+  'aliyuncs.com'        // sdk.rum / log endpoints the z.ai frontend loads at boot
 ];
 
 /* upstream origin for the /chat route (env CHAT_UPSTREAM overrides, e.g. for staging) */
@@ -51,7 +64,701 @@ function chatHost(event) {
 }
 
 /* markers filled by the build script */
-const PATCH_JS = "/* ============================================================\n * z.ai pocket \u2014 runtime patch\n * Injected by the proxy worker into every proxied HTML document\n * as the FIRST script inside <head>. It rewrites every network\n * call, navigation and popup so the SPA believes it lives on its\n * real origin while every byte actually flows through the worker.\n *\n * NOTE: this source is embedded inside a <script> tag in proxied\n * pages, so it must never contain the literal sequence \"</scr\" +\n * \"ipt>\" \u2014 keep it that way.\n * ============================================================ */\n(function () {\n  'use strict';\n  if (window.__ZAI_PATCHED__) return;\n  window.__ZAI_PATCHED__ = true;\n\n  var CFG = window.__ZAI__ || {};\n  var PFX = CFG.pfx || '';            // proxy prefix for this document, e.g. \"/chat\" or \"/p/z-cdn.chatglm.cn\"\n  var HOST = (CFG.host || '').toLowerCase(); // upstream host this document belongs to\n  var WORKER = CFG.worker || '';      // worker origin, e.g. https://name.workers.dev\n  var TOKEN = CFG.token || '';        // optional shared proxy token\n  var ALLOW = CFG.allow || [];        // allowlisted host suffixes\n\n  var jar = [];                       // fallback cookie jar (mirrored by the shell)\n  var lsMirror = {};                  // fallback localStorage mirror (for browsers that block it in iframes)\n  var upQueue = [];\n\n  /* ---------- messaging ---------- */\n  function up(msg) {\n    try {\n      msg.zai = 1;\n      if (window.parent && window.parent !== window) window.parent.postMessage(msg, '*');\n    } catch (e) { /* ignore */ }\n  }\n\n  /* ---------- host matching ---------- */\n  function allowedHost(h) {\n    h = (h || '').toLowerCase().replace(/\\.$/, '');\n    if (!h) return false;\n    for (var i = 0; i < ALLOW.length; i++) {\n      var a = String(ALLOW[i]).toLowerCase();\n      if (h === a || h.slice(-(a.length + 1)) === '.' + a) return true;\n    }\n    return false;\n  }\n\n  /* ---------- proxy-path bookkeeping ----------\n   * Guards against double-prefixing and recognises URLs that already\n   * point at the worker (same-origin) instead of the upstream host.\n   */\n  function originStr() {\n    try { return location.origin || (location.protocol + '//' + location.host); } catch (e) { return ''; }\n  }\n  function hasPfx(str) {\n    if (!PFX) return true;\n    if (str === PFX) return true;\n    return str.indexOf(PFX) === 0 && /^[\\/?#;]/.test(str.charAt(PFX.length));\n  }\n  function isCrossHostPath(str) { // \"/p/<allowlisted host>/\u2026\"\n    if (/^\\/p\\//.test(str)) {\n      var h = str.slice(3).split(/[\\/?#]/)[0].toLowerCase();\n      if (allowedHost(h)) return true;\n    }\n    return false;\n  }\n  function isProxyPath(p) {\n    if (!p) return false;\n    if (hasPfx(p)) return true;\n    if (isCrossHostPath(p)) return true;\n    if (/^\\/__(status|clear)([\\/?#]|$)/.test(p)) return true;\n    return false;\n  }\n\n  /* ---------- URL mapping ----------\n   * absolute / protocol-relative allowlisted URLs -> proxy paths\n   * same-origin (worker) absolute URLs -> normalised proxy paths\n   * root-absolute paths -> PFX + path  (they belong to this doc's upstream host)\n   * relative / data: / blob: / #...   -> untouched\n   */\n  function mapUrl(u) {\n    try {\n      if (u == null) return u;\n      if (typeof u === 'object' && u instanceof URL) {\n        var s = mapUrl(u.href);\n        return s;\n      }\n      if (typeof u !== 'string') return u;\n      var str = u.trim();\n      if (!str) return str;\n      if (/^(data|blob|about|javascript|mailto|tel|sms|intent|ms-|chrome|file|ws|wss):/i.test(str)) {\n        // wss/ws handled by the WebSocket wrapper below; here pass through\n        return str;\n      }\n      if (str.charAt(0) === '#') return str;\n      var m;\n      if ((m = str.match(/^https?:\\/\\/([^\\/?#]+)/i))) {\n        var host = m[1].toLowerCase();\n        var org = originStr();\n        if (org && (str === org || str.indexOf(org + '/') === 0)) {\n          // same-origin (worker) absolute URL \u2014 either already proxied\n          // (\"/chat/\u2026\", \"/p/host/\u2026\") or a bare worker-root path that\n          // still belongs to this document's upstream\n          var sp = str.slice(org.length) || '/';\n          if (isProxyPath(sp)) return sp;\n          return PFX + sp;\n        }\n        if (!allowedHost(host)) return str;                    // external: leave (usually analytics)\n        var rest = str.slice(m[0].length) || '/';\n        if (host === HOST) return PFX + rest;\n        return '/p/' + host + rest;\n      }\n      if ((m = str.match(/^\\/\\/([^\\/?#]+)/))) {\n        var h2 = m[1].toLowerCase();\n        if (!allowedHost(h2)) return str;\n        var rest2 = str.slice(m[0].length) || '/';\n        if (h2 === HOST) return PFX + rest2;\n        return '/p/' + h2 + rest2;\n      }\n      if (str.charAt(0) === '/' && str.charAt(1) !== '/') {\n        if (hasPfx(str)) return str;          // already carries this doc's proxy prefix\n        if (isCrossHostPath(str)) return str; // already a /p/<host>/ proxy path\n        return PFX + str;\n      }\n      return str; // relative \u2192 resolves against the proxied document URL\n    } catch (e) { return u; }\n  }\n\n  /* ---------- cookies ---------- */\n  function docCookies() {\n    var out = [];\n    try {\n      (document.cookie || '').split(';').forEach(function (kv) {\n        kv = kv.trim();\n        if (kv) out.push(kv);\n      });\n    } catch (e) { /* ignore */ }\n    return out;\n  }\n\n  function cookieHeader() {\n    var seen = {};\n    var parts = [];\n    docCookies().forEach(function (kv) {\n      var name = kv.split('=')[0];\n      if (!seen[name]) { seen[name] = 1; parts.push(kv); }\n    });\n    jar.forEach(function (c) {\n      if (c && c.name && !seen[c.name]) { seen[c.name] = 1; parts.push(c.name + '=' + c.value); }\n    });\n    return parts.join('; ');\n  }\n\n  function ingestSetCookie(hdrVal) {\n    try {\n      if (!hdrVal) return;\n      var arr = JSON.parse(decodeURIComponent(hdrVal));\n      if (!Array.isArray(arr)) return;\n      var map = {};\n      jar.forEach(function (c) { map[c.name] = c; });\n      arr.forEach(function (raw) {\n        var bits = String(raw).split(';');\n        var nv = bits[0];\n        var eq = nv.indexOf('=');\n        if (eq < 1) return;\n        var c = { name: nv.slice(0, eq).trim(), value: nv.slice(eq + 1).trim() };\n        for (var i = 1; i < bits.length; i++) {\n          var b = bits[i].trim();\n          var k = b.split('=')[0].toLowerCase();\n          if (k === 'max-age') {\n            var ma = parseInt(b.slice(8), 10);\n            if (ma === 0) { c.del = true; }\n            c.maxAge = ma;\n          }\n        }\n        if (c.del) delete map[c.name];\n        else map[c.name] = c;\n      });\n      jar = [];\n      Object.keys(map).forEach(function (k) { jar.push(map[k]); });\n      up({ type: 'cookies', cookies: jar });\n    } catch (e) { /* ignore */ }\n  }\n\n  function seedDocumentCookies() {\n    jar.forEach(function (c) {\n      try {\n        document.cookie = c.name + '=' + c.value + '; path=/; Max-Age=31536000; Secure; SameSite=None; Partitioned';\n      } catch (e) { /* ignore */ }\n    });\n  }\n\n  /* ---------- header injection ---------- */\n  function applyHeaders(h) {\n    try {\n      var ch = cookieHeader();\n      if (ch && !h.has('x-cookie')) h.set('x-cookie', ch);\n      if (TOKEN && !h.has('x-proxy-token')) h.set('x-proxy-token', TOKEN);\n    } catch (e) { /* ignore */ }\n    return h;\n  }\n\n  /* ---------- fetch ---------- */\n  var _fetch = window.fetch ? window.fetch.bind(window) : null;\n  if (_fetch) {\n    window.fetch = function (input, init) {\n      try {\n        if (input && typeof input === 'object' && typeof input.url === 'string' && input.constructor && input.constructor.name === 'Request') {\n          var mapped = mapUrl(input.url);\n          if (mapped !== input.url) {\n            try { input = new Request(mapped, input); } catch (e2) { /* keep original */ }\n          }\n        } else if (typeof input === 'string' || input instanceof URL) {\n          var u2 = mapUrl(String(input));\n          if (u2 !== String(input)) input = u2;\n        }\n        init = init || {};\n        var H;\n        try { H = (init.headers instanceof Headers) ? init.headers : new Headers(init.headers || {}); }\n        catch (e3) { H = new Headers(); }\n        init.headers = applyHeaders(H);\n        var p = _fetch(input, init);\n        p.then(function (r) {\n          try { ingestSetCookie(r.headers && r.headers.get('x-set-cookie')); } catch (e4) { /* ignore */ }\n        }, function () { /* network error \u2014 swallow */ });\n        return p;\n      } catch (e) {\n        return _fetch(input, init);\n      }\n    };\n  }\n\n  /* ---------- XMLHttpRequest ---------- */\n  try {\n    var _open = XMLHttpRequest.prototype.open;\n    XMLHttpRequest.prototype.open = function (method, url) {\n      try {\n        var mu = mapUrl(String(url));\n        if (mu !== String(url)) {\n          if (arguments.length > 2) {\n            arguments[1] = mu;\n            return _open.apply(this, arguments);\n          }\n          return _open.call(this, method, mu);\n        }\n      } catch (e) { /* ignore */ }\n      return _open.apply(this, arguments);\n    };\n    var _send = XMLHttpRequest.prototype.send;\n    XMLHttpRequest.prototype.send = function () {\n      try {\n        var ch = cookieHeader();\n        if (ch) this.setRequestHeader('x-cookie', ch);\n        if (TOKEN) this.setRequestHeader('x-proxy-token', TOKEN);\n      } catch (e) { /* ignore */ }\n      var xhr = this;\n      try {\n        xhr.addEventListener('loadend', function () {\n          try { ingestSetCookie(xhr.getResponseHeader && xhr.getResponseHeader('x-set-cookie')); } catch (e2) { /* ignore */ }\n        });\n      } catch (e3) { /* ignore */ }\n      return _send.apply(this, arguments);\n    };\n  } catch (e) { /* ignore */ }\n\n  /* ---------- EventSource ---------- */\n  try {\n    if (window.EventSource) {\n      var _ES = window.EventSource;\n      window.EventSource = function (url, cfg) {\n        try { url = mapUrl(String(url)); } catch (e) { /* ignore */ }\n        return new _ES(url, cfg);\n      };\n      window.EventSource.prototype = _ES.prototype;\n    }\n  } catch (e) { /* ignore */ }\n\n  /* ---------- WebSocket ---------- */\n  try {\n    if (window.WebSocket) {\n      var _WS = window.WebSocket;\n      window.WebSocket = function (url, protocols) {\n        try {\n          var s = String(url);\n          var m = s.match(/^(wss?):\\/\\/([^\\/?#]+)(\\/.*)?$/i);\n          if (m) {\n            var host = m[2].toLowerCase();\n            var scheme = m[1].toLowerCase() === 'ws' ? 'ws' : 'wss';\n            if (allowedHost(host)) {\n              var rest = m[3] || '/';\n              var path = (host === HOST ? PFX : '/p/' + host) + rest;\n              if (TOKEN && path.indexOf('__t=') < 0) {\n                path += (path.indexOf('?') < 0 ? '?' : '&') + '__t=' + encodeURIComponent(TOKEN);\n              }\n              url = (location.protocol === 'https:' ? 'wss' : scheme) + '://' + location.host + path;\n            }\n          }\n        } catch (e) { /* ignore */ }\n        return protocols === undefined ? new _WS(url) : new _WS(url, protocols);\n      };\n      window.WebSocket.prototype = _WS.prototype;\n      window.WebSocket.CONNECTING = _WS.CONNECTING;\n      window.WebSocket.OPEN = _WS.OPEN;\n      window.WebSocket.CLOSING = _WS.CLOSING;\n      window.WebSocket.CLOSED = _WS.CLOSED;\n    }\n  } catch (e) { /* ignore */ }\n\n  /* ---------- sendBeacon ---------- */\n  try {\n    if (navigator.sendBeacon) {\n      var _sb = navigator.sendBeacon.bind(navigator);\n      navigator.sendBeacon = function (url, data) {\n        try {\n          var mu = mapUrl(String(url));\n          if (mu !== String(url)) {\n            // beacons cannot carry custom headers; fall back to keepalive fetch\n            return _fetch(mu, { method: 'POST', body: data, keepalive: true, mode: 'no-cors' }) ? true : true;\n          }\n        } catch (e) { /* ignore */ }\n        return _sb(url, data);\n      };\n    }\n  } catch (e) { /* ignore */ }\n\n  /* ---------- navigation reporting ---------- */\n  function curUrl() { return location.pathname + location.search + location.hash; }\n  function reportNav() { up({ type: 'nav', url: curUrl(), title: document.title || '' }); }\n\n  try {\n    var _push = history.pushState;\n    var _replace = history.replaceState;\n    // SPA history entries must stay inside the proxy prefix: a bare\n    // \"/login\" pushed from \"/chat/\" would escape the sandbox on the next\n    // reload, and a cross-origin URL would throw SecurityError outright.\n    function fixHistUrl(u) {\n      try {\n        var s = String(u);\n        if (!s || s.charAt(0) === '#') return s;\n        var org = originStr();\n        if (org && (s === org || s.indexOf(org + '/') === 0)) {\n          var p = s.slice(org.length) || '/';\n          if (isProxyPath(p)) return p;\n          return PFX + p;\n        }\n        var mapped = mapUrl(s);\n        if (/^(https?:)?\\/\\//i.test(mapped)) return curUrl(); // cross-origin \u2192 would throw\n        return mapped;\n      } catch (e) { return u; }\n    }\n    history.pushState = function () {\n      try { if (arguments.length > 2 && arguments[2] != null) arguments[2] = fixHistUrl(arguments[2]); } catch (e2) { /* ignore */ }\n      var r = _push.apply(this, arguments); reportNav(); return r;\n    };\n    history.replaceState = function () {\n      try { if (arguments.length > 2 && arguments[2] != null) arguments[2] = fixHistUrl(arguments[2]); } catch (e2) { /* ignore */ }\n      var r = _replace.apply(this, arguments); reportNav(); return r;\n    };\n    window.addEventListener('popstate', reportNav);\n    window.addEventListener('hashchange', reportNav);\n    window.addEventListener('pageshow', reportNav);\n  } catch (e) { /* ignore */ }\n\n  /* ---------- Navigation API interception (Chrome/Edge) ----------\n   * catches location.href=..., form submits, link clicks \u2014 anything\n   * that would navigate this frame to an absolute or external URL.\n   */\n  try {\n    if (window.navigation && window.navigation.addEventListener) {\n      window.navigation.addEventListener('navigate', function (e) {\n        try {\n          if (!e.canIntercept || !e.destination || e.destination.sameDocument) return;\n          var dest = String(e.destination.url || '');\n          if (!dest) return;\n          var org = originStr();\n          if (org && (dest === org || dest.indexOf(org + '/') === 0)) {\n            // same-origin destination on the worker itself: either an\n            // already-proxied path (proceed natively \u2014 the old code used to\n            // eat these as \"external\") or a bare worker-root path that must\n            // regain this document's proxy prefix\n            var p = dest.slice(org.length) || '/';\n            if (isProxyPath(p)) return;\n            e.preventDefault();\n            location.href = PFX + p;\n            return;\n          }\n          var mapped = mapUrl(dest);\n          if (mapped !== dest) {\n            // z.ai-family absolute URL \u2192 swap for the proxied path\n            e.preventDefault();\n            location.href = mapped;\n            return;\n          }\n          if (/^https?:\\/\\//i.test(dest) || /^\\/\\//.test(dest)) {\n            // external site \u2014 the phone will block it anyway; tell the shell\n            e.preventDefault();\n            up({ type: 'ext', url: dest });\n          }\n          // relative destinations proceed natively\n        } catch (err) { /* ignore */ }\n      });\n    }\n  } catch (e) { /* ignore */ }\n\n  /* ---------- window.open ---------- */\n  function stubWindow() {\n    return {\n      closed: false,\n      close: function () { this.closed = true; },\n      focus: function () {}, blur: function () {},\n      postMessage: function () {},\n      location: { href: 'about:blank', replace: function () {}, assign: function () {} },\n      document: { write: function () {}, open: function () {}, close: function () {}, createElement: function () { return { setAttribute: function () {}, appendChild: function () {} }; } }\n    };\n  }\n  window.open = function (url) {\n    try {\n      var u = url == null ? '' : String(url);\n      if (!u || u === 'about:blank') return stubWindow();\n      var mapped = mapUrl(u);\n      if (mapped !== u) { location.href = mapped; return stubWindow(); }\n      if (/^(https?:)?\\/\\//i.test(u)) { up({ type: 'ext', url: u }); return stubWindow(); }\n      location.href = u;\n      return stubWindow();\n    } catch (e) { return stubWindow(); }\n  };\n\n  /* ---------- click / submit capture (fallback layer) ---------- */\n  document.addEventListener('click', function (e) {\n    try {\n      if (e.defaultPrevented || (e.button !== undefined && e.button !== 0)) return;\n      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;\n      var el = e.target;\n      var a = el && el.closest ? el.closest('a[href]') : null;\n      if (!a) return;\n      var href = a.getAttribute('href') || '';\n      if (!href || href.charAt(0) === '#' || /^(data|blob|javascript|mailto|tel):/i.test(href)) return;\n      var target = (a.target || '').toLowerCase();\n      var mapped = mapUrl(href);\n      if (mapped !== href) {\n        if (target === '_top' || target === '_parent' || target === '_blank') {\n          e.preventDefault();\n          location.href = mapped;\n        } else {\n          a.setAttribute('href', mapped); // let native navigation use the proxied href\n        }\n        return;\n      }\n      if (/^(https?:)?\\/\\//i.test(href)) {\n        e.preventDefault();\n        up({ type: 'ext', url: href });\n        return;\n      }\n      if (target === '_top' || target === '_parent') {\n        e.preventDefault();\n        location.href = href;\n      }\n    } catch (err) { /* ignore */ }\n  }, true);\n\n  document.addEventListener('submit', function (e) {\n    try {\n      var f = e.target;\n      if (!f || !f.getAttribute) return;\n      var action = f.getAttribute('action') || '';\n      if (action) {\n        var mapped = mapUrl(action);\n        if (mapped !== action) f.setAttribute('action', mapped);\n      }\n      var target = (f.target || '').toLowerCase();\n      if (target === '_top' || target === '_parent' || target === '_blank') {\n        e.preventDefault();\n        var dest = f.getAttribute('action') || curUrl();\n        if (/^(https?:)?\\/\\//i.test(dest) && mapUrl(dest) === dest) { up({ type: 'ext', url: dest }); return; }\n        location.href = dest;\n      }\n    } catch (err) { /* ignore */ }\n  }, true);\n\n  /* ---------- service worker: never register ----------\n   * a SW would bypass every patch we installed.\n   */\n  try {\n    if (navigator.serviceWorker && navigator.serviceWorker.register) {\n      navigator.serviceWorker.register = function () {\n        return Promise.resolve({ scope: '/', active: null, installing: null, waiting: null, unregister: function () { return Promise.resolve(true); }, addEventListener: function () {}, state: 'activated' });\n      };\n    }\n  } catch (e) { /* ignore */ }\n\n  /* ---------- analytics shims (their hosts are blocked anyway) ---------- */\n  window.dataLayer = window.dataLayer || [];\n  window.gtag = window.gtag || function () { window.dataLayer.push(arguments); };\n\n  /* ---------- localStorage fallback for browsers that block it in iframes ----------\n   * backed by the shell through postMessage so sessions survive reloads.\n   */\n  (function setupStorage() {\n    function usable(store) {\n      try {\n        var k = '__zai_probe__';\n        store.setItem(k, '1');\n        store.removeItem(k);\n        return true;\n      } catch (e) { return false; }\n    }\n    function makeShim(name) {\n      var mem = (name === 'localStorage') ? lsMirror : {};\n      return {\n        getItem: function (k) { return Object.prototype.hasOwnProperty.call(mem, k) ? mem[k] : null; },\n        setItem: function (k, v) { mem[k] = String(v); up({ type: 'ls', store: name, k: String(k), v: String(v) }); },\n        removeItem: function (k) { delete mem[k]; up({ type: 'ls', store: name, k: String(k), v: null }); },\n        clear: function () { mem = {}; up({ type: 'ls', store: name, k: '__clear__', v: null }); },\n        key: function (i) { return Object.keys(mem)[i] || null; }\n      };\n    }\n    ['localStorage', 'sessionStorage'].forEach(function (name) {\n      try {\n        if (!usable(window[name])) {\n          Object.defineProperty(window, name, { value: makeShim(name), configurable: true, writable: false });\n        }\n      } catch (e) { /* ignore */ }\n    });\n  })();\n\n  /* ---------- title watcher ---------- */\n  function watchTitle() {\n    try {\n      var t = document.querySelector('title');\n      if (t && window.MutationObserver) {\n        new MutationObserver(reportNav).observe(t, { childList: true, characterData: true, subtree: true });\n      }\n    } catch (e) { /* ignore */ }\n  }\n  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', watchTitle);\n  else watchTitle();\n\n  /* ---------- error forwarding (diagnostics) ---------- */\n  var errCount = 0;\n  window.addEventListener('error', function (e) {\n    if (errCount++ < 10) up({ type: 'err', msg: String((e && e.message) || e).slice(0, 300) });\n  });\n\n  /* ---------- shell commands ---------- */\n  window.addEventListener('message', function (e) {\n    try {\n      var d = e.data;\n      if (!d || d.zai !== 1 || !d.cmd) return;\n      if (e.origin !== 'null' && WORKER && e.origin !== WORKER) return;\n      switch (d.cmd) {\n        case 'init':\n          jar = Array.isArray(d.jar) ? d.jar : [];\n          if (d.ls) {\n            Object.keys(d.ls).forEach(function (k) {\n              if (!(k in lsMirror)) lsMirror[k] = d.ls[k];\n            });\n          }\n          seedDocumentCookies();\n          reportNav();\n          break;\n        case 'back': history.back(); break;\n        case 'forward': history.forward(); break;\n        case 'reload': location.reload(); break;\n        case 'navigate':\n          if (d.url) location.href = mapUrl(String(d.url));\n          break;\n        case 'getstate': reportNav(); break;\n      }\n    } catch (err) { /* ignore */ }\n  });\n\n  /* ---------- boot ---------- */\n  up({ type: 'hello', url: curUrl(), title: document.title || '' });\n  reportNav();\n})();\n";
+const PATCH_JS = [
+"/* ============================================================",
+" * z.ai pocket \u2014 runtime patch",
+" * Injected by the proxy worker into every proxied HTML document",
+" * as the FIRST script inside <head>. It rewrites every network",
+" * call, navigation and popup so the SPA believes it lives on its",
+" * real origin while every byte actually flows through the worker.",
+" *",
+" * NOTE: this source is embedded inside a <script> tag in proxied",
+" * pages, so it must never contain the literal sequence \"</scr\" +",
+" * \"ipt>\" \u2014 keep it that way.",
+" * ============================================================ */",
+"(function () {",
+"  'use strict';",
+"  if (window.__ZAI_PATCHED__) return;",
+"  window.__ZAI_PATCHED__ = true;",
+"",
+"  var CFG = window.__ZAI__ || {};",
+"  var PFX = CFG.pfx || '';            // proxy prefix for this document, e.g. \"/chat\" or \"/p/z-cdn.chatglm.cn\"",
+"  var HOST = (CFG.host || '').toLowerCase(); // upstream host this document belongs to",
+"  var WORKER = CFG.worker || '';      // worker origin, e.g. https://name.workers.dev",
+"  var TOKEN = CFG.token || '';        // optional shared proxy token",
+"  var ALLOW = CFG.allow || [];        // allowlisted host suffixes",
+"",
+"  var jar = [];                       // fallback cookie jar (mirrored by the shell)",
+"  var lsMirror = {};                  // fallback localStorage mirror (for browsers that block it in iframes)",
+"  var upQueue = [];",
+"",
+"  /* ---------- messaging ---------- */",
+"  function up(msg) {",
+"    try {",
+"      msg.zai = 1;",
+"      if (window.parent && window.parent !== window) window.parent.postMessage(msg, '*');",
+"    } catch (e) { /* ignore */ }",
+"  }",
+"",
+"  /* ---------- on-page toast (top-level mode: no shell above us) ---------- */",
+"  var toastCount = 0;",
+"  function pageToast(msg) {",
+"    try {",
+"      if (window.parent && window.parent !== window) return; // shell handles messages",
+"      if (toastCount >= 4) return;",
+"      toastCount++;",
+"      var d = document.createElement('div');",
+"      d.textContent = msg;",
+"      d.setAttribute('style', 'position:fixed;left:12px;right:12px;bottom:max(18px,env(safe-area-inset-bottom));z-index:2147483647;background:#20232F;color:#E7E9EE;border:1px solid rgba(255,255,255,.16);border-radius:14px;padding:13px 15px;font:13px/1.5 -apple-system,BlinkMacSystemFont,system-ui,\"Segoe UI\",Roboto,sans-serif;box-shadow:0 12px 32px rgba(0,0,0,.45);word-break:break-all;opacity:0;transition:opacity .25s;pointer-events:none');",
+"      (document.body || document.documentElement).appendChild(d);",
+"      var raf = window.requestAnimationFrame || function (f) { setTimeout(f, 16); };",
+"      raf(function () { d.style.opacity = '1'; });",
+"      setTimeout(function () {",
+"        try { d.style.opacity = '0'; setTimeout(function () { d.remove(); }, 300); } catch (e) { /* ignore */ }",
+"      }, 4500);",
+"    } catch (e) { /* ignore */ }",
+"  }",
+"",
+"  /* ---------- host matching ---------- */",
+"  function allowedHost(h) {",
+"    h = (h || '').toLowerCase().replace(/\\.$/, '');",
+"    if (!h) return false;",
+"    for (var i = 0; i < ALLOW.length; i++) {",
+"      var a = String(ALLOW[i]).toLowerCase();",
+"      if (h === a || h.slice(-(a.length + 1)) === '.' + a) return true;",
+"    }",
+"    return false;",
+"  }",
+"",
+"  /* ---------- proxy-path bookkeeping ----------",
+"   * Guards against double-prefixing and recognises URLs that already",
+"   * point at the worker (same-origin) instead of the upstream host.",
+"   */",
+"  function originStr() {",
+"    try { return location.origin || (location.protocol + '//' + location.host); } catch (e) { return ''; }",
+"  }",
+"  function hasPfx(str) {",
+"    if (!PFX) return true;",
+"    if (str === PFX) return true;",
+"    return str.indexOf(PFX) === 0 && /^[\\/?#;]/.test(str.charAt(PFX.length));",
+"  }",
+"  function isCrossHostPath(str) { // \"/p/<allowlisted host>/\u2026\"",
+"    if (/^\\/p\\//.test(str)) {",
+"      var h = str.slice(3).split(/[\\/?#]/)[0].toLowerCase();",
+"      if (allowedHost(h)) return true;",
+"    }",
+"    return false;",
+"  }",
+"  function isProxyPath(p) {",
+"    if (!p) return false;",
+"    if (hasPfx(p)) return true;",
+"    if (isCrossHostPath(p)) return true;",
+"    if (/^\\/__(status|clear)([\\/?#]|$)/.test(p)) return true;",
+"    return false;",
+"  }",
+"",
+"  /* ---------- URL mapping ----------",
+"   * absolute / protocol-relative allowlisted URLs -> proxy paths",
+"   * same-origin (worker) absolute URLs -> normalised proxy paths",
+"   * root-absolute paths -> PFX + path  (they belong to this doc's upstream host)",
+"   * relative / data: / blob: / #...   -> untouched",
+"   */",
+"  function mapUrl(u) {",
+"    try {",
+"      if (u == null) return u;",
+"      if (typeof u === 'object' && u instanceof URL) {",
+"        var s = mapUrl(u.href);",
+"        return s;",
+"      }",
+"      if (typeof u !== 'string') return u;",
+"      var str = u.trim();",
+"      if (!str) return str;",
+"      if (/^(data|blob|about|javascript|mailto|tel|sms|intent|ms-|chrome|file|ws|wss):/i.test(str)) {",
+"        // wss/ws handled by the WebSocket wrapper below; here pass through",
+"        return str;",
+"      }",
+"      if (str.charAt(0) === '#') return str;",
+"      var m;",
+"      if ((m = str.match(/^https?:\\/\\/([^\\/?#]+)/i))) {",
+"        var host = m[1].toLowerCase();",
+"        var org = originStr();",
+"        if (org && (str === org || str.indexOf(org + '/') === 0)) {",
+"          // same-origin (worker) absolute URL \u2014 either already proxied",
+"          // (\"/chat/\u2026\", \"/p/host/\u2026\") or a bare worker-root path that",
+"          // still belongs to this document's upstream",
+"          var sp = str.slice(org.length) || '/';",
+"          if (isProxyPath(sp)) return sp;",
+"          return PFX + sp;",
+"        }",
+"        if (!allowedHost(host)) return str;                    // external: leave (usually analytics)",
+"        var rest = str.slice(m[0].length) || '/';",
+"        if (host === HOST) return PFX + rest;",
+"        return '/p/' + host + rest;",
+"      }",
+"      if ((m = str.match(/^\\/\\/([^\\/?#]+)/))) {",
+"        var h2 = m[1].toLowerCase();",
+"        if (!allowedHost(h2)) return str;",
+"        var rest2 = str.slice(m[0].length) || '/';",
+"        if (h2 === HOST) return PFX + rest2;",
+"        return '/p/' + h2 + rest2;",
+"      }",
+"      if (str.charAt(0) === '/' && str.charAt(1) !== '/') {",
+"        if (hasPfx(str)) return str;          // already carries this doc's proxy prefix",
+"        if (isCrossHostPath(str)) return str; // already a /p/<host>/ proxy path",
+"        return PFX + str;",
+"      }",
+"      return str; // relative \u2192 resolves against the proxied document URL",
+"    } catch (e) { return u; }",
+"  }",
+"",
+"  /* ---------- cookies ---------- */",
+"  function docCookies() {",
+"    var out = [];",
+"    try {",
+"      (document.cookie || '').split(';').forEach(function (kv) {",
+"        kv = kv.trim();",
+"        if (kv) out.push(kv);",
+"      });",
+"    } catch (e) { /* ignore */ }",
+"    return out;",
+"  }",
+"",
+"  function cookieHeader() {",
+"    var seen = {};",
+"    var parts = [];",
+"    docCookies().forEach(function (kv) {",
+"      var name = kv.split('=')[0];",
+"      if (!seen[name]) { seen[name] = 1; parts.push(kv); }",
+"    });",
+"    jar.forEach(function (c) {",
+"      if (c && c.name && !seen[c.name]) { seen[c.name] = 1; parts.push(c.name + '=' + c.value); }",
+"    });",
+"    return parts.join('; ');",
+"  }",
+"",
+"  function ingestSetCookie(hdrVal) {",
+"    try {",
+"      if (!hdrVal) return;",
+"      var arr = JSON.parse(decodeURIComponent(hdrVal));",
+"      if (!Array.isArray(arr)) return;",
+"      var map = {};",
+"      jar.forEach(function (c) { map[c.name] = c; });",
+"      arr.forEach(function (raw) {",
+"        var bits = String(raw).split(';');",
+"        var nv = bits[0];",
+"        var eq = nv.indexOf('=');",
+"        if (eq < 1) return;",
+"        var c = { name: nv.slice(0, eq).trim(), value: nv.slice(eq + 1).trim() };",
+"        for (var i = 1; i < bits.length; i++) {",
+"          var b = bits[i].trim();",
+"          var k = b.split('=')[0].toLowerCase();",
+"          if (k === 'max-age') {",
+"            var ma = parseInt(b.slice(8), 10);",
+"            if (ma === 0) { c.del = true; }",
+"            c.maxAge = ma;",
+"          }",
+"        }",
+"        if (c.del) delete map[c.name];",
+"        else map[c.name] = c;",
+"      });",
+"      jar = [];",
+"      Object.keys(map).forEach(function (k) { jar.push(map[k]); });",
+"      up({ type: 'cookies', cookies: jar });",
+"    } catch (e) { /* ignore */ }",
+"  }",
+"",
+"  function seedDocumentCookies() {",
+"    jar.forEach(function (c) {",
+"      try {",
+"        document.cookie = c.name + '=' + c.value + '; path=/; Max-Age=31536000; Secure; SameSite=None; Partitioned';",
+"      } catch (e) { /* ignore */ }",
+"    });",
+"  }",
+"",
+"  /* ---------- header injection ---------- */",
+"  function applyHeaders(h) {",
+"    try {",
+"      var ch = cookieHeader();",
+"      if (ch && !h.has('x-cookie')) h.set('x-cookie', ch);",
+"      if (TOKEN && !h.has('x-proxy-token')) h.set('x-proxy-token', TOKEN);",
+"    } catch (e) { /* ignore */ }",
+"    return h;",
+"  }",
+"",
+"  /* ---------- fetch ---------- */",
+"  var _fetch = window.fetch ? window.fetch.bind(window) : null;",
+"  if (_fetch) {",
+"    window.fetch = function (input, init) {",
+"      try {",
+"        if (input && typeof input === 'object' && typeof input.url === 'string' && input.constructor && input.constructor.name === 'Request') {",
+"          var mapped = mapUrl(input.url);",
+"          if (mapped !== input.url) {",
+"            try { input = new Request(mapped, input); } catch (e2) { /* keep original */ }",
+"          }",
+"        } else if (typeof input === 'string' || input instanceof URL) {",
+"          var u2 = mapUrl(String(input));",
+"          if (u2 !== String(input)) input = u2;",
+"        }",
+"        init = init || {};",
+"        var H;",
+"        try { H = (init.headers instanceof Headers) ? init.headers : new Headers(init.headers || {}); }",
+"        catch (e3) { H = new Headers(); }",
+"        init.headers = applyHeaders(H);",
+"        var p = _fetch(input, init);",
+"        p.then(function (r) {",
+"          try { ingestSetCookie(r.headers && r.headers.get('x-set-cookie')); } catch (e4) { /* ignore */ }",
+"        }, function () { /* network error \u2014 swallow */ });",
+"        return p;",
+"      } catch (e) {",
+"        return _fetch(input, init);",
+"      }",
+"    };",
+"  }",
+"",
+"  /* ---------- XMLHttpRequest ---------- */",
+"  try {",
+"    var _open = XMLHttpRequest.prototype.open;",
+"    XMLHttpRequest.prototype.open = function (method, url) {",
+"      try {",
+"        var mu = mapUrl(String(url));",
+"        if (mu !== String(url)) {",
+"          if (arguments.length > 2) {",
+"            arguments[1] = mu;",
+"            return _open.apply(this, arguments);",
+"          }",
+"          return _open.call(this, method, mu);",
+"        }",
+"      } catch (e) { /* ignore */ }",
+"      return _open.apply(this, arguments);",
+"    };",
+"    var _send = XMLHttpRequest.prototype.send;",
+"    XMLHttpRequest.prototype.send = function () {",
+"      try {",
+"        var ch = cookieHeader();",
+"        if (ch) this.setRequestHeader('x-cookie', ch);",
+"        if (TOKEN) this.setRequestHeader('x-proxy-token', TOKEN);",
+"      } catch (e) { /* ignore */ }",
+"      var xhr = this;",
+"      try {",
+"        xhr.addEventListener('loadend', function () {",
+"          try { ingestSetCookie(xhr.getResponseHeader && xhr.getResponseHeader('x-set-cookie')); } catch (e2) { /* ignore */ }",
+"        });",
+"      } catch (e3) { /* ignore */ }",
+"      return _send.apply(this, arguments);",
+"    };",
+"  } catch (e) { /* ignore */ }",
+"",
+"  /* ---------- EventSource ---------- */",
+"  try {",
+"    if (window.EventSource) {",
+"      var _ES = window.EventSource;",
+"      window.EventSource = function (url, cfg) {",
+"        try {",
+"          var mu = mapUrl(String(url));",
+"          /* EventSource cannot set headers \u2014 carry the token in the query */",
+"          if (TOKEN && mu !== String(url) && String(mu).indexOf('__t=') < 0) {",
+"            mu += (mu.indexOf('?') < 0 ? '?' : '&') + '__t=' + encodeURIComponent(TOKEN);",
+"          }",
+"          url = mu;",
+"        } catch (e) { /* ignore */ }",
+"        return new _ES(url, cfg);",
+"      };",
+"      window.EventSource.prototype = _ES.prototype;",
+"    }",
+"  } catch (e) { /* ignore */ }",
+"",
+"  /* ---------- WebSocket ---------- */",
+"  try {",
+"    if (window.WebSocket) {",
+"      var _WS = window.WebSocket;",
+"      window.WebSocket = function (url, protocols) {",
+"        try {",
+"          var s = String(url);",
+"          var m = s.match(/^(wss?):\\/\\/([^\\/?#]+)(\\/.*)?$/i);",
+"          if (m) {",
+"            var host = m[2].toLowerCase();",
+"            var scheme = m[1].toLowerCase() === 'ws' ? 'ws' : 'wss';",
+"            if (allowedHost(host)) {",
+"              var rest = m[3] || '/';",
+"              var path = (host === HOST ? PFX : '/p/' + host) + rest;",
+"              if (TOKEN && path.indexOf('__t=') < 0) {",
+"                path += (path.indexOf('?') < 0 ? '?' : '&') + '__t=' + encodeURIComponent(TOKEN);",
+"              }",
+"              url = (location.protocol === 'https:' ? 'wss' : scheme) + '://' + location.host + path;",
+"            }",
+"          }",
+"        } catch (e) { /* ignore */ }",
+"        return protocols === undefined ? new _WS(url) : new _WS(url, protocols);",
+"      };",
+"      window.WebSocket.prototype = _WS.prototype;",
+"      window.WebSocket.CONNECTING = _WS.CONNECTING;",
+"      window.WebSocket.OPEN = _WS.OPEN;",
+"      window.WebSocket.CLOSING = _WS.CLOSING;",
+"      window.WebSocket.CLOSED = _WS.CLOSED;",
+"    }",
+"  } catch (e) { /* ignore */ }",
+"",
+"  /* ---------- sendBeacon ---------- */",
+"  try {",
+"    if (navigator.sendBeacon) {",
+"      var _sb = navigator.sendBeacon.bind(navigator);",
+"      navigator.sendBeacon = function (url, data) {",
+"        try {",
+"          var mu = mapUrl(String(url));",
+"          if (mu !== String(url)) {",
+"            // beacons cannot carry custom headers; fall back to keepalive fetch",
+"            return _fetch(mu, { method: 'POST', body: data, keepalive: true, mode: 'no-cors' }) ? true : true;",
+"          }",
+"        } catch (e) { /* ignore */ }",
+"        return _sb(url, data);",
+"      };",
+"    }",
+"  } catch (e) { /* ignore */ }",
+"",
+"  /* ---------- navigation reporting ---------- */",
+"  function curUrl() { return location.pathname + location.search + location.hash; }",
+"  function reportNav() { up({ type: 'nav', url: curUrl(), title: document.title || '' }); }",
+"",
+"  try {",
+"    var _push = history.pushState;",
+"    var _replace = history.replaceState;",
+"    // SPA history entries must stay inside the proxy prefix: a bare",
+"    // \"/login\" pushed from \"/chat/\" would escape the sandbox on the next",
+"    // reload, and a cross-origin URL would throw SecurityError outright.",
+"    function fixHistUrl(u) {",
+"      try {",
+"        var s = String(u);",
+"        if (!s || s.charAt(0) === '#') return s;",
+"        var org = originStr();",
+"        if (org && (s === org || s.indexOf(org + '/') === 0)) {",
+"          var p = s.slice(org.length) || '/';",
+"          if (isProxyPath(p)) return p;",
+"          return PFX + p;",
+"        }",
+"        var mapped = mapUrl(s);",
+"        if (/^(https?:)?\\/\\//i.test(mapped)) return curUrl(); // cross-origin \u2192 would throw",
+"        return mapped;",
+"      } catch (e) { return u; }",
+"    }",
+"    history.pushState = function () {",
+"      try { if (arguments.length > 2 && arguments[2] != null) arguments[2] = fixHistUrl(arguments[2]); } catch (e2) { /* ignore */ }",
+"      var r = _push.apply(this, arguments); reportNav(); return r;",
+"    };",
+"    history.replaceState = function () {",
+"      try { if (arguments.length > 2 && arguments[2] != null) arguments[2] = fixHistUrl(arguments[2]); } catch (e2) { /* ignore */ }",
+"      var r = _replace.apply(this, arguments); reportNav(); return r;",
+"    };",
+"    window.addEventListener('popstate', reportNav);",
+"    window.addEventListener('hashchange', reportNav);",
+"    window.addEventListener('pageshow', reportNav);",
+"  } catch (e) { /* ignore */ }",
+"",
+"  /* ---------- Navigation API interception (Chrome/Edge) ----------",
+"   * catches location.href=..., form submits, link clicks \u2014 anything",
+"   * that would navigate this frame to an absolute or external URL.",
+"   */",
+"  try {",
+"    if (window.navigation && window.navigation.addEventListener) {",
+"      window.navigation.addEventListener('navigate', function (e) {",
+"        try {",
+"          if (!e.canIntercept || !e.destination || e.destination.sameDocument) return;",
+"          var dest = String(e.destination.url || '');",
+"          if (!dest) return;",
+"          var org = originStr();",
+"          if (org && (dest === org || dest.indexOf(org + '/') === 0)) {",
+"            // same-origin destination on the worker itself: either an",
+"            // already-proxied path (proceed natively \u2014 the old code used to",
+"            // eat these as \"external\") or a bare worker-root path that must",
+"            // regain this document's proxy prefix",
+"            var p = dest.slice(org.length) || '/';",
+"            if (isProxyPath(p)) return;",
+"            e.preventDefault();",
+"            location.href = PFX + p;",
+"            return;",
+"          }",
+"          var mapped = mapUrl(dest);",
+"          if (mapped !== dest) {",
+"            // z.ai-family absolute URL \u2192 swap for the proxied path",
+"            e.preventDefault();",
+"            location.href = mapped;",
+"            return;",
+"          }",
+"          if (/^https?:\\/\\//i.test(dest) || /^\\/\\//.test(dest)) {",
+"            // external site \u2014 the phone will block it anyway; tell the user",
+"            e.preventDefault();",
+"            up({ type: 'ext', url: dest });",
+"            pageToast('Blocked (outside the proxy): ' + dest);",
+"          }",
+"          // relative destinations proceed natively",
+"        } catch (err) { /* ignore */ }",
+"      });",
+"    }",
+"  } catch (e) { /* ignore */ }",
+"",
+"  /* ---------- window.open ---------- */",
+"  function stubWindow() {",
+"    return {",
+"      closed: false,",
+"      close: function () { this.closed = true; },",
+"      focus: function () {}, blur: function () {},",
+"      postMessage: function () {},",
+"      location: { href: 'about:blank', replace: function () {}, assign: function () {} },",
+"      document: { write: function () {}, open: function () {}, close: function () {}, createElement: function () { return { setAttribute: function () {}, appendChild: function () {} }; } }",
+"    };",
+"  }",
+"  window.open = function (url) {",
+"    try {",
+"      var u = url == null ? '' : String(url);",
+"      if (!u || u === 'about:blank') return stubWindow();",
+"      var mapped = mapUrl(u);",
+"      if (mapped !== u) { location.href = mapped; return stubWindow(); }",
+"      if (/^(https?:)?\\/\\//i.test(u)) { up({ type: 'ext', url: u }); pageToast('Blocked (outside the proxy): ' + u); return stubWindow(); }",
+"      location.href = u;",
+"      return stubWindow();",
+"    } catch (e) { return stubWindow(); }",
+"  };",
+"",
+"  /* ---------- click / submit capture (fallback layer) ---------- */",
+"  document.addEventListener('click', function (e) {",
+"    try {",
+"      if (e.defaultPrevented || (e.button !== undefined && e.button !== 0)) return;",
+"      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;",
+"      var el = e.target;",
+"      var a = el && el.closest ? el.closest('a[href]') : null;",
+"      if (!a) return;",
+"      var href = a.getAttribute('href') || '';",
+"      if (!href || href.charAt(0) === '#' || /^(data|blob|javascript|mailto|tel):/i.test(href)) return;",
+"      var target = (a.target || '').toLowerCase();",
+"      var mapped = mapUrl(href);",
+"      if (mapped !== href) {",
+"        if (target === '_top' || target === '_parent' || target === '_blank') {",
+"          e.preventDefault();",
+"          location.href = mapped;",
+"        } else {",
+"          a.setAttribute('href', mapped); // let native navigation use the proxied href",
+"        }",
+"        return;",
+"      }",
+"      if (/^(https?:)?\\/\\//i.test(href)) {",
+"        e.preventDefault();",
+"        up({ type: 'ext', url: href });",
+"        pageToast('Blocked (outside the proxy): ' + href);",
+"        return;",
+"      }",
+"      if (target === '_top' || target === '_parent') {",
+"        e.preventDefault();",
+"        location.href = href;",
+"      }",
+"    } catch (err) { /* ignore */ }",
+"  }, true);",
+"",
+"  document.addEventListener('submit', function (e) {",
+"    try {",
+"      var f = e.target;",
+"      if (!f || !f.getAttribute) return;",
+"      var action = f.getAttribute('action') || '';",
+"      if (action) {",
+"        var mapped = mapUrl(action);",
+"        if (mapped !== action) f.setAttribute('action', mapped);",
+"      }",
+"      var target = (f.target || '').toLowerCase();",
+"      if (target === '_top' || target === '_parent' || target === '_blank') {",
+"        e.preventDefault();",
+"        var dest = f.getAttribute('action') || curUrl();",
+"        if (/^(https?:)?\\/\\//i.test(dest) && mapUrl(dest) === dest) { up({ type: 'ext', url: dest }); return; }",
+"        location.href = dest;",
+"      }",
+"    } catch (err) { /* ignore */ }",
+"  }, true);",
+"",
+"  /* ---------- service worker: never register ----------",
+"   * a SW would bypass every patch we installed.",
+"   */",
+"  try {",
+"    if (navigator.serviceWorker && navigator.serviceWorker.register) {",
+"      navigator.serviceWorker.register = function () {",
+"        return Promise.resolve({ scope: '/', active: null, installing: null, waiting: null, unregister: function () { return Promise.resolve(true); }, addEventListener: function () {}, state: 'activated' });",
+"      };",
+"    }",
+"  } catch (e) { /* ignore */ }",
+"",
+"  /* ---------- dynamic subresource rewriting ----------",
+"   * The SPA builds absolute URLs at runtime for images, scripts,",
+"   * stylesheets and downloads (e.g. https://z-cdn.chatglm.cn/\u2026).",
+"   * Those would leave the proxy and die on a network that can only",
+"   * reach the worker. Rewrite them as they are inserted \u2014 hosts that",
+"   * are not allowlisted are left untouched (they fail quietly, like",
+"   * analytics does on the real site in China).",
+"   */",
+"  var RES_ATTRS = { IMG: ['src', 'srcset'], SCRIPT: ['src'], LINK: ['href'], SOURCE: ['src', 'srcset'], AUDIO: ['src', 'poster'], VIDEO: ['src', 'poster'], IFRAME: ['src'], OBJECT: ['data'], EMBED: ['src'], IMAGE: ['href'] };",
+"  function fixEl(el) {",
+"    try {",
+"      if (!el || !el.tagName || !el.getAttribute || !el.setAttribute) return;",
+"      var attrs = RES_ATTRS[el.tagName.toUpperCase()];",
+"      if (!attrs) return;",
+"      for (var i = 0; i < attrs.length; i++) {",
+"        var a = attrs[i];",
+"        var v = el.getAttribute(a);",
+"        if (!v) continue;",
+"        var nv = mapUrl(v);",
+"        if (nv !== v) el.setAttribute(a, nv);",
+"      }",
+"    } catch (e) { /* ignore */ }",
+"  }",
+"  function scanTree(node) {",
+"    try {",
+"      if (!node || node.nodeType !== 1) return;",
+"      fixEl(node);",
+"      if (node.querySelectorAll) {",
+"        var els = node.querySelectorAll('img,script,link,source,audio,video,iframe,object,embed,image');",
+"        for (var i = 0; i < els.length; i++) fixEl(els[i]);",
+"      }",
+"    } catch (e) { /* ignore */ }",
+"  }",
+"  try {",
+"    if (window.MutationObserver && document.documentElement) {",
+"      var mo = new MutationObserver(function (muts) {",
+"        for (var i = 0; i < muts.length; i++) {",
+"          var m = muts[i];",
+"          if (m.type === 'attributes') { fixEl(m.target); continue; }",
+"          for (var j = 0; j < m.addedNodes.length; j++) scanTree(m.addedNodes[j]);",
+"        }",
+"      });",
+"      mo.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'href', 'srcset', 'poster', 'data'] });",
+"    }",
+"  } catch (e) { /* ignore */ }",
+"",
+"  /* Detached elements bypass the observer: telemetry beacons and preload",
+"   * probes set img.src (or setAttribute) without ever entering the DOM.",
+"   * Patch the property setter and setAttribute so those URLs are mapped",
+"   * onto the worker as well. */",
+"  try {",
+"    var imgProto = window.HTMLImageElement && window.HTMLImageElement.prototype;",
+"    var srcDesc = imgProto && Object.getOwnPropertyDescriptor(imgProto, 'src');",
+"    if (srcDesc && srcDesc.set) {",
+"      Object.defineProperty(imgProto, 'src', {",
+"        get: function () { return srcDesc.get.call(this); },",
+"        set: function (v) {",
+"          try {",
+"            var mu = mapUrl(String(v));",
+"            if (mu !== String(v)) v = mu;",
+"          } catch (e) { /* ignore */ }",
+"          return srcDesc.set.call(this, v);",
+"        },",
+"        configurable: true,",
+"        enumerable: srcDesc.enumerable",
+"      });",
+"    }",
+"  } catch (e) { /* ignore */ }",
+"",
+"  try {",
+"    var _setattr = Element.prototype.setAttribute;",
+"    Element.prototype.setAttribute = function (name, value) {",
+"      try {",
+"        var n = String(name).toLowerCase();",
+"        if ((n === 'src' || n === 'href' || n === 'srcset' || n === 'poster' || n === 'data') &&",
+"            typeof value === 'string' && this && this.tagName) {",
+"          var attrs = RES_ATTRS[this.tagName.toUpperCase()];",
+"          if (attrs && attrs.indexOf(n) >= 0) {",
+"            var mu = mapUrl(value);",
+"            if (mu !== value) value = mu;",
+"          }",
+"        }",
+"      } catch (e) { /* ignore */ }",
+"      return _setattr.call(this, name, value);",
+"    };",
+"  } catch (e) { /* ignore */ }",
+"",
+"  /* ---------- analytics shims (their hosts are blocked anyway) ---------- */",
+"  window.dataLayer = window.dataLayer || [];",
+"  window.gtag = window.gtag || function () { window.dataLayer.push(arguments); };",
+"",
+"  /* ---------- localStorage fallback for browsers that block it in iframes ----------",
+"   * backed by the shell through postMessage so sessions survive reloads.",
+"   */",
+"  (function setupStorage() {",
+"    function usable(store) {",
+"      try {",
+"        var k = '__zai_probe__';",
+"        store.setItem(k, '1');",
+"        store.removeItem(k);",
+"        return true;",
+"      } catch (e) { return false; }",
+"    }",
+"    function makeShim(name) {",
+"      var mem = (name === 'localStorage') ? lsMirror : {};",
+"      return {",
+"        getItem: function (k) { return Object.prototype.hasOwnProperty.call(mem, k) ? mem[k] : null; },",
+"        setItem: function (k, v) { mem[k] = String(v); up({ type: 'ls', store: name, k: String(k), v: String(v) }); },",
+"        removeItem: function (k) { delete mem[k]; up({ type: 'ls', store: name, k: String(k), v: null }); },",
+"        clear: function () { mem = {}; up({ type: 'ls', store: name, k: '__clear__', v: null }); },",
+"        key: function (i) { return Object.keys(mem)[i] || null; }",
+"      };",
+"    }",
+"    ['localStorage', 'sessionStorage'].forEach(function (name) {",
+"      try {",
+"        if (!usable(window[name])) {",
+"          Object.defineProperty(window, name, { value: makeShim(name), configurable: true, writable: false });",
+"        }",
+"      } catch (e) { /* ignore */ }",
+"    });",
+"  })();",
+"",
+"  /* ---------- title watcher ---------- */",
+"  function watchTitle() {",
+"    try {",
+"      var t = document.querySelector('title');",
+"      if (t && window.MutationObserver) {",
+"        new MutationObserver(reportNav).observe(t, { childList: true, characterData: true, subtree: true });",
+"      }",
+"    } catch (e) { /* ignore */ }",
+"  }",
+"  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', watchTitle);",
+"  else watchTitle();",
+"",
+"  /* ---------- error forwarding (diagnostics) ---------- */",
+"  var errCount = 0;",
+"  window.addEventListener('error', function (e) {",
+"    var msg = String((e && e.message) || e).slice(0, 300);",
+"    if (errCount < 10) up({ type: 'err', msg: msg });",
+"    if (errCount < 3) pageToast('Page error: ' + msg);",
+"    errCount++;",
+"  });",
+"",
+"  /* ---------- shell commands ---------- */",
+"  window.addEventListener('message', function (e) {",
+"    try {",
+"      var d = e.data;",
+"      if (!d || d.zai !== 1 || !d.cmd) return;",
+"      if (e.origin !== 'null' && WORKER && e.origin !== WORKER) return;",
+"      switch (d.cmd) {",
+"        case 'init':",
+"          jar = Array.isArray(d.jar) ? d.jar : [];",
+"          if (d.ls) {",
+"            Object.keys(d.ls).forEach(function (k) {",
+"              if (!(k in lsMirror)) lsMirror[k] = d.ls[k];",
+"            });",
+"          }",
+"          seedDocumentCookies();",
+"          reportNav();",
+"          break;",
+"        case 'back': history.back(); break;",
+"        case 'forward': history.forward(); break;",
+"        case 'reload': location.reload(); break;",
+"        case 'navigate':",
+"          if (d.url) location.href = mapUrl(String(d.url));",
+"          break;",
+"        case 'getstate': reportNav(); break;",
+"      }",
+"    } catch (err) { /* ignore */ }",
+"  });",
+"",
+"  /* ---------- boot ---------- */",
+"  up({ type: 'hello', url: curUrl(), title: document.title || '' });",
+"  reportNav();",
+"})();",
+""
+].join("\n");
 
 /* ============================================================ */
 
@@ -80,28 +787,51 @@ async function handle(req, event) {
       }
       return json({ ok: true, name: VERSION, time: new Date().toISOString(), token_required: !!token, token_ok: tokenOk }, req);
     }
-    if (url.pathname === '/' || url.pathname === '/index.html') {
-      return landing(event);
-    }
-    if (url.pathname === '/favicon.ico') {
-      return new Response(FAVICON_SVG, { headers: { 'content-type': 'image/svg+xml', 'cache-control': 'public, max-age=86400' } });
+    /* ---- app entry: "/" IS the app ----
+     * With a token required and not yet satisfied, / shows the setup
+     * page; otherwise it falls through and is proxied like any path. */
+    if (url.pathname === '/') {
+      const env = envOf(event);
+      const token = env.PROXY_TOKEN || '';
+      if (token && !(await checkToken(req, url, token))) {
+        /* a token was submitted but wrong → show the hint; fresh visit → plain form */
+        return landing(event, url.searchParams.has('__t'));
+      }
     }
 
     /* ---- token gate ---- */
     const env = envOf(event);
     const token = env.PROXY_TOKEN || '';
     if (token && !(await checkToken(req, url, token))) {
+      const accept = req.headers.get('accept') || '';
+      if (method === 'GET' && accept.includes('text/html')) {
+        /* a human navigation with a wrong/missing token → the setup page */
+        return landing(event, true);
+      }
       return json({ error: 'unauthorized', hint: 'set X-Proxy-Token header or __t query param' }, req, 401);
+    }
+
+    /* ---- token was supplied in the query: remember it, clean the URL ---- */
+    if (token && url.searchParams.has('__t')) {
+      const clean = new URL(req.url);
+      clean.searchParams.delete('__t');
+      const h = new Headers({ location: clean.pathname + (clean.search || ''), 'cache-control': 'no-store' });
+      h.append('set-cookie', tokenCookie(token));
+      return new Response(null, { status: 302, headers: corsHeaders(req, h) });
     }
 
     /* ---- session cookie clear ---- */
     if (url.pathname === '/__clear') {
-      const names = (url.searchParams.get('names') || '').split(',').map((s) => s.trim()).filter(Boolean);
-      const h = new Headers({ location: '/chat/', 'content-type': 'text/html' });
-      names.forEach((n) => h.append('set-cookie', n + '=; Path=/; Max-Age=0; Secure; SameSite=None; Partitioned'));
-      h.append('set-cookie', '__zai_t=; Path=/; Max-Age=0; Secure; SameSite=None; Partitioned');
-      const out = corsHeaders(req, h);
-      return new Response(null, { status: 302, headers: out });
+      const h = new Headers({ location: '/', 'cache-control': 'no-store' });
+      /* expire every cookie the browser sent, plus the token cookie */
+      const ck = req.headers.get('cookie') || '';
+      const seen = new Set(['__zai_t']);
+      ck.split(';').forEach((kv) => {
+        const n = kv.split('=')[0].trim();
+        if (n) seen.add(n);
+      });
+      seen.forEach((n) => h.append('set-cookie', n + '=; Path=/; Max-Age=0; Secure; SameSite=None; Partitioned'));
+      return new Response(null, { status: 302, headers: corsHeaders(req, h) });
     }
 
     /* ---- websocket upgrade ---- */
@@ -110,14 +840,14 @@ async function handle(req, event) {
     }
 
     /* ---- route resolution ---- */
-    let pfx = null;      // proxy prefix for this document, e.g. "/chat" or "/p/z-cdn.chatglm.cn"
+    let pfx = '';       // proxy prefix for this document ('' = transparent)
     let upstream = null; // absolute upstream URL
     let host = null;     // upstream host
 
     if (url.pathname === '/chat' || url.pathname.startsWith('/chat/')) {
-      host = chatHost(event);
-      pfx = '/chat';
-      upstream = chatUpstream(event) + url.pathname.slice('/chat'.length) + url.search;
+      /* legacy v2 prefix — the SPA errors on /chat/; move to / */
+      const rest = url.pathname.slice('/chat'.length) || '/';
+      return redirect(req, rest + url.search);
     } else if (url.pathname.startsWith('/p/')) {
       const rest = url.pathname.slice(3); // "<host>/path..."
       const slash = rest.indexOf('/');
@@ -129,7 +859,11 @@ async function handle(req, event) {
       pfx = '/p/' + host;
       upstream = 'https://' + host + path + url.search;
     } else {
-      return json({ error: 'unknown route', hint: 'use /chat/ or /p/<host>/ — open the worker root / for help' }, req, 404);
+      /* transparent catch-all: the whole worker mirrors chat.z.ai.
+       * Runtime-built root-absolute URLs (/static/logo.png, /user.png …)
+       * and SPA routes (/auth, /#…) behave exactly like the real site. */
+      host = chatHost(event);
+      upstream = chatUpstream(event) + url.pathname + url.search;
     }
 
     /* ---- strip proxy token from query ---- */
@@ -238,12 +972,19 @@ async function checkToken(req, url, token) {
   if (m && decodeURIComponent(m[1]) === token) return true;
   return false;
 }
+function tokenCookie(token) {
+  return '__zai_t=' + encodeURIComponent(token) + '; Path=/; Max-Age=31536000; Secure; SameSite=None; Partitioned';
+}
+function redirect(req, to) {
+  const h = new Headers({ location: to, 'cache-control': 'no-store' });
+  return new Response(null, { status: 302, headers: corsHeaders(req, h) });
+}
 function maybeSetTokenCookie(req, h, event) {
   const token = envOf(event).PROXY_TOKEN || '';
   if (!token) return;
   const ck = req.headers.get('cookie') || '';
   if (ck.indexOf('__zai_t=') >= 0) return;
-  h.append('set-cookie', '__zai_t=' + encodeURIComponent(token) + '; Path=/; Max-Age=31536000; Secure; SameSite=None; Partitioned');
+  h.append('set-cookie', tokenCookie(token));
 }
 
 function mergeCookies(a, b) {
@@ -340,7 +1081,7 @@ function mapLocation(loc, upUrl, event) {
   }
 }
 function prefixForHost(host, event) {
-  if (host === chatHost(event)) return '/chat';
+  if (host === chatHost(event)) return ''; // transparent: the app lives at /
   return '/p/' + host;
 }
 
@@ -449,11 +1190,9 @@ function rewriteCss(text, pfx, host, allow) {
 /* ---------------- websocket proxy ---------------- */
 async function proxyWebsocket(req, url, event) {
   try {
-    /* resolve upstream ws url */
+    /* resolve upstream ws url — the whole worker mirrors chat.z.ai */
     let target;
-    if (url.pathname === '/chat' || url.pathname.startsWith('/chat/')) {
-      target = chatUpstream(event).replace(/^http/, 'ws') + url.pathname.slice('/chat'.length) + url.search;
-    } else if (url.pathname.startsWith('/p/')) {
+    if (url.pathname.startsWith('/p/')) {
       const rest = url.pathname.slice(3);
       const slash = rest.indexOf('/');
       const host = slash < 0 ? rest : rest.slice(0, slash);
@@ -461,7 +1200,7 @@ async function proxyWebsocket(req, url, event) {
       if (!hostAllowed(host, event)) return json({ error: 'host not allowed' }, req, 403);
       target = 'wss://' + host + path + url.search;
     } else {
-      return json({ error: 'unknown route' }, req, 404);
+      target = chatUpstream(event).replace(/^http/, 'ws') + url.pathname + url.search;
     }
     const t = new URL(target);
     if (t.searchParams.has('__t')) t.searchParams.delete('__t');
@@ -493,21 +1232,45 @@ async function proxyWebsocket(req, url, event) {
   }
 }
 
-/* ---------------- landing page ---------------- */
+/* ---------------- landing / token setup page ---------------- */
 const FAVICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#171A23"/><path d="M18 20h28v7H33.5L46 44h-8.5L27 30.5V44h-9z" fill="#7C6CF0"/></svg>';
 
-function landing(event) {
-  const tokenRequired = !!(envOf(event).PROXY_TOKEN);
-  const html = '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
-    '<title>z.ai pocket proxy</title><link rel="icon" href="data:image/svg+xml,' + encodeURIComponent(FAVICON_SVG) + '">' +
-    '<style>body{background:#0B0D12;color:#E7E9EE;font-family:system-ui,-apple-system,sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}' +
-    '.c{max-width:420px;padding:40px 28px;text-align:center}h1{font-size:22px;margin:0 0 6px}p{color:#9aa1ad;font-size:14px;line-height:1.6;margin:8px 0}' +
-    'a{display:inline-block;margin-top:18px;background:#6E6AF8;color:#fff;text-decoration:none;padding:13px 26px;border-radius:12px;font-weight:600}' +
-    '.ok{color:#4ade80;font-size:13px;margin-top:14px}</style></head><body><div class="c">' +
-    '<h1>z.ai pocket proxy</h1><p>' + VERSION + '</p>' +
-    '<p>Online. Point the zai-pocket.html app at this URL, or jump straight in:</p>' +
-    '<a href="/chat/">Open chat.z.ai</a>' +
-    '<p class="ok">&#10003; worker reachable' + (tokenRequired ? ' &middot; token required' : ' &middot; no token set (add PROXY_TOKEN for safety)') + '</p>' +
+function landing(event, bad) {
+  const html = '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
+    '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">' +
+    '<meta name="theme-color" content="#0B0D12">' +
+    '<title>z.ai pocket — setup</title>' +
+    '<link rel="icon" href="data:image/svg+xml,' + encodeURIComponent(FAVICON_SVG) + '">' +
+    '<style>' +
+    ':root{--bg:#0B0D12;--panel:#14161F;--panel2:#1A1D28;--line:rgba(255,255,255,.08);--txt:#E7E9EE;--sub:#9AA1AD;--acc:#6E6AF8;--bad:#F87171}' +
+    '*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}' +
+    'body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;background:radial-gradient(1100px 500px at 50% -12%,rgba(110,106,248,.14),transparent 60%),var(--bg);color:var(--txt);font-family:-apple-system,BlinkMacSystemFont,system-ui,"Segoe UI",Roboto,sans-serif;font-size:15px;line-height:1.5}' +
+    '.card{width:100%;max-width:400px;background:var(--panel);border:1px solid var(--line);border-radius:22px;padding:28px 22px;box-shadow:0 24px 60px rgba(0,0,0,.5)}' +
+    '.logoRow{display:flex;align-items:center;gap:12px;margin-bottom:18px}' +
+    '.logo{width:46px;height:46px;border-radius:13px;background:linear-gradient(135deg,#6E6AF8,#4E4AC8);display:flex;align-items:center;justify-content:center;flex:none;box-shadow:0 8px 24px rgba(110,106,248,.35)}' +
+    '.logo svg{width:26px;height:26px}' +
+    'h1{margin:0;font-size:21px;letter-spacing:.2px}' +
+    '.tag{color:var(--sub);font-size:13px;margin-top:2px}' +
+    'label{display:block;font-size:12.5px;color:var(--sub);margin:14px 0 7px;font-weight:600;letter-spacing:.3px}' +
+    '.inWrap{display:flex;align-items:center;background:var(--panel2);border:1px solid var(--line);border-radius:13px;padding:0 12px;transition:border-color .15s}' +
+    '.inWrap:focus-within{border-color:var(--acc)}' +
+    'input{flex:1;background:none;border:none;outline:none;padding:13px 0;font-size:15px;color:var(--txt);min-width:0}' +
+    'input::placeholder{color:#5b6270}' +
+    '.btn{display:flex;align-items:center;justify-content:center;width:100%;margin-top:16px;padding:14px;border:none;border-radius:14px;font:inherit;font-weight:650;font-size:15px;background:var(--acc);color:#fff;cursor:pointer}' +
+    '.btn:active{transform:scale(.985)}' +
+    '.err{margin-top:12px;padding:10px 12px;border-radius:10px;background:rgba(248,113,113,.1);border:1px solid rgba(248,113,113,.35);color:#FDA4AF;font-size:13px;line-height:1.5}' +
+    '.hint{margin-top:14px;color:var(--sub);font-size:12.5px;line-height:1.6}' +
+    '.hint b{color:var(--txt)}' +
+    '</style></head><body><div class="card">' +
+    '<div class="logoRow"><div class="logo"><svg viewBox="0 0 64 64"><path d="M18 20h28v7H33.5L46 44h-8.5L27 30.5V44h-9z" fill="#fff"/></svg></div>' +
+    '<div><h1>z.ai pocket</h1><div class="tag">This worker is protected by a proxy token.</div></div></div>' +
+    (bad ? '<div class="err">That token was not accepted — check it and try again.</div>' : '') +
+    '<form method="GET" action="/">' +
+    '<label for="t">PROXY TOKEN</label>' +
+    '<div class="inWrap"><input id="t" name="__t" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="paste your PROXY_TOKEN" autofocus></div>' +
+    '<button class="btn" type="submit">Enter Z.ai&nbsp;&rarr;</button></form>' +
+    '<div class="hint">The token lives in your worker\u2019s <b>Settings &rarr; Variables &rarr; PROXY_TOKEN</b> on dash.cloudflare.com. ' +
+    'It is stored in a cookie on this device, so you only enter it once.</div>' +
     '</div></body></html>';
-  return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } });
+  return new Response(html, { status: bad ? 401 : 200, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } });
 }
