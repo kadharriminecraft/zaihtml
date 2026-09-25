@@ -1,1204 +1,513 @@
-/* =====================================================================
-   NEXUS BACKGROUND RELAY v5 — Cloudflare Worker (the honest retry engine)
-   =====================================================================
-   THE MISSION: you send a prompt and walk away. THIS worker owns the
-   request from that moment on. It keeps the generation running
-   SERVER-SIDE in durable storage, re-requests the model until the
-   answer is fully complete (even if OpenRouter is busy or down for
-   minutes), and every time you reopen the app you get either live
-   progress or the whole finished answer. Nothing depends on your phone
-   being on, your screen being unlocked, or the app even being open.
+/* ============================================================
+ * z.ai pocket — Cloudflare Worker reverse proxy
+ * ------------------------------------------------------------
+ * WHAT THIS DOES
+ *   Makes https://chat.z.ai work from inside a single local HTML
+ *   file ("zai-pocket.html"). Every request the real site makes
+ *   (HTML, JS/CSS assets, API calls, SSE streams, uploads,
+ *   downloads) is answered by THIS worker, which forwards it to
+ *   the z.ai family of hosts. The browser never talks to z.ai.
+ *
+ * DEPLOY (you already have a worker):
+ *   1. dash.cloudflare.com → Workers & Pages → your worker
+ *   2. "Edit code" / Quick Edit → select all → paste this file
+ *   3. Save & Deploy
+ *   4. (recommended) Settings → Variables → add PROXY_TOKEN with
+ *      a long random string, and put the same string into the
+ *      app's settings. Optional: EXTRA_HOSTS="a.com,b.com" to
+ *      allowlist additional first-party hosts.
+ *
+ * ROUTES
+ *   /chat/*            -> https://chat.z.ai/*
+ *   /p/<host>/*        -> https://<host>/*  (host must be allowlisted)
+ *   /__status          -> health check JSON
+ *   /__clear?names=..  -> expire session cookies (used by the app)
+ *   /                  -> landing page
+ *
+ * SECURITY
+ *   - Only z.ai / chatglm.cn / chatglm.site family hosts are
+ *     proxied. This is NOT an open proxy.
+ *   - With PROXY_TOKEN set, everything except the landing page,
+ *     /__status and preflights requires the token.
+ *   - Upstream cookies are re-issued for this worker's own domain
+ *     (SameSite=None; Secure; Partitioned) so they work inside the
+ *     app's iframe; the app also mirrors them as a fallback.
+ * ============================================================ */
 
-   WHY v5 EXISTS (what v4 got wrong in real Cloudflare):
-     v4 turned every retryable upstream failure (429 rate-limit, 5xx,
-     network blip) into a durable job — good — but when the first 4
-     inline retries didn't get in (~20s of a busy provider), it RELEASED
-     the job and CLOSED the client's stream cleanly with ZERO bytes.
-     The app read that as "the response ended without a finish marker and
-     without any text" → the cryptic "The response was cut off before it
-     finished. (status 0)" dead end, and the job sat stuck in D1 (nothing
-     drove it: the cron wasn't firing and piggyback only ran on /health).
-     Reproduced under real workerd: a 9-long 429 storm produced exactly
-     bytes:0 + a permanently stuck job.
+const VERSION = 'zai-pocket-proxy 1.0';
 
-   THE v5 FIX — honest retries at every layer (app stays v3, untouched):
-     1. RETRY NOTICES ARE REAL BYTES: every retry emits an SSE comment
-        (": nexus upstream 429 — re-requesting until it gets in (attempt
-        N/24) in ~Xs") into the job buffer — livePush'd to you AND
-        flushed to D1. The app's parser skips comments, its byte-offset
-        accounting stays exact, and its stall watchdog gets fed, so you
-        see a live "Thinking…" stream while the worker fights the
-        provider — never a silent freeze, never a zero-byte close.
-     2. OpenRouter's 429 retry_after is honored (capped 30s) so the
-        re-request cadence is exactly as fast as the provider asks.
-     3. BIGGER INLINE BUDGET: the request-driven pump now retries 12
-        times in-context (~minutes of "re-request until it gets in")
-        instead of v4's 4.
-     4. GIVE-UP = stream ERROR, never a clean close: if the inline
-        budget is exhausted, the job is released for the cron/piggyback
-        AND attached clients get controller.error() — the app treats it
-        as a dropped socket and reconnects to /job/:id?offset=N, where
-        the tail it lands on drives the job the moment the backoff
-        elapses. The stream only ever closes cleanly WITH a finish
-        marker.
-     5. PROVIDER ERRORS ARE REAL BYTES: a fatal upstream error (401
-        invalid key, 402 out of credits, …) is persisted into the job
-        buffer as an SSE error event, so the client you're watching AND
-        every reconnecting tail see the ACTUAL error and status — the
-        app shows "Your API key is invalid…" instead of "(status 0)".
-     6. ANY request piggybacks one due job into its own fresh context
-        (not just /health), so stuck jobs revive the instant ANY traffic
-        arrives — including the app's own reconnect attempts.
-
-   WHY v4 EXISTS (what v3 got wrong) — still true, still fixed:
-     v3 held jobs in worker MEMORY. Cloudflare tears down a request's
-     execution context roughly 30 seconds after the client disconnects —
-     the self-ping keepalive chain kept the ISOLATE warm, but the
-     runtime still killed the running pump promise. Result: the stream
-     you saw "while you were gone" died early, and the app reported the
-     response as interrupted. Local tests never caught it because Bun
-     (the test runtime) never kills promises.
-
-   THE DURABLE ENGINE (unchanged from v4):
-     1. ALL job state lives in D1 (SQLite at the edge — strongly
-        consistent; survives isolate recycling, worker redeploys, and
-        full Cloudflare restarts). Every streamed byte is flushed to the
-        job's chunk log while streaming.
-     2. Generation happens in DISCRETE upstream attempts, not one
-        fragile long-held connection. If an attempt is cut off (no
-        [DONE] / finish_reason), the next driver re-asks the model with
-        the app's exact CONTINUE protocol and appends the rest to the
-        same job. If the upstream is busy/refusing, the worker
-        re-requests on a backoff schedule "until it gets in".
-     3. THREE DRIVERS keep jobs moving, each in a brand-new event
-        context (so the ~30s teardown can't kill them mid-flight):
-          - the request event itself (while you're watching),
-          - a piggyback work pass on ANY incoming request (the moment
-            your app reconnects or polls a job, progress resumes),
-          - a Cron Trigger (every minute) — THIS is what works with
-            your phone completely off.
-     4. ATOMIC JOB CLAIMS: a driver may only take a job whose pump
-        heartbeat went stale and whose retry backoff has elapsed. The
-        conditional UPDATE is atomic in D1, so two racing drivers can
-        never double-generate.
-     5. ATTACH-ON-CONTINUE preserved: when the app sends its own
-        continue request (…conversation, assistant partial, "continue"
-        instruction) and a matching job is running or finished, the
-        worker serves THAT job from the exact byte boundary — no second
-        generation, no double spend. If the app is somehow AHEAD of the
-        job buffer, the stale job is retired and a fresh generation
-        continues from the app's (longer) partial.
-     6. Tool-call cuts are PARKED, not continued server-side (mirrors
-        the app's discard-partial-tools protocol — a half-written file
-        must never be executed). The app finishes those on return via
-        its own auto-resume, cleanly.
-
-   WIRE PROTOCOL (what NexusAiPro.html speaks — unchanged from v3):
-     POST {relay}/chat      → SSE stream + "X-Nexus-Job: <id>" header
-     POST {relay}/images    → JSON + "X-Nexus-Job: <id>" header
-     GET  {relay}/job/:id?offset=N → replay from byte N + live tail
-                              (404/410 when gone → app auto-continues;
-                              failed jobs replay their buffered error)
-     GET  {relay}/health    → {"ok":true,"v":5,...}   ← deploy check
-     DELETE {relay}/job/:id → free the job early
-
-   SETUP / UPGRADE (~4 minutes, dashboard only — no local tools):
-     1. Cloudflare dashboard → Workers & Pages → nexusaipro → Edit code
-        → select all → paste this entire file → Deploy.
-     2. Same worker → Settings → Bindings → Add → D1 database:
-        create one (any name, e.g. nexus-jobs) → bind it with variable
-        name EXACTLY: DB
-     3. Same worker → Settings → Triggers & Events (Cron Triggers)
-        → Add Cron Trigger → schedule EXACTLY:  * * * * *
-        (every minute — this is what finishes answers while your phone
-        is off). NOTE: without the cron, jobs only progress while the
-        app is open; /health will keep saying cronOk:false until it
-        fires — check it after ~1 minute.
-     4. Open https://nexusaipro.kadharri-minecraft.workers.dev/health
-        → it must say "v":5, "d1":true, "cronOk":true.
-        The health output literally tells you which step is missing.
-
-   AUTH NOTE (honest): the app's "Authorization: Bearer <OpenRouter key>"
-   is required to re-request the model while you are away, so it is
-   stored in YOUR OWN D1 database for the lifetime of that job only
-   (minutes), and deleted the moment the job finishes, fails, is parked
-   or is pruned. It is never logged, never returned by any endpoint.
-   D1 is private to your Cloudflare account — the same trust boundary
-   as the worker that already proxies that header. If you'd rather not,
-   simply don't bind D1: the worker then runs as a plain passthrough
-   relay (graceful degrade — nothing breaks, you just don't get the
-   phone-off job engine).
-
-   LIMITS (honest):
-     - Unfinished jobs are worked for up to 30 minutes / 24 attempts,
-       then marked failed (the buffered error event tells the app why;
-       the app still auto-continues on return).
-     - Finished jobs replay for 10 minutes, then are pruned.
-     - 8 MB buffer cap per job (a normal response is < 1 MB).
-     - Free plan: D1 + Cron Triggers are both included. Very long jobs
-       may hit the free plan's per-request subrequest budget — the
-       design degrades gracefully (the stream reconnects in a fresh
-       context and work continues).
-     - D1 must be bound as "DB" and the cron must be "* * * * *" for
-       the full phone-off experience; /health reports both.
-   ===================================================================== */
-
-const WORKER_VERSION = 5;
-
-/* test tunables — production reads defaults; the local harness may
-   override via globalThis.__nexusTun to run E2E in seconds. */
-function TUN(key, def) {
-  const t = globalThis.__nexusTun;
-  return t && Object.prototype.hasOwnProperty.call(t, key) ? t[key] : def;
-}
-
-const MAX_JOB_BYTES = TUN("maxJobBytes", 8 * 1024 * 1024);
-const JOB_TTL_MS = TUN("jobTtlMs", 30 * 60 * 1000);
-const DONE_TTL_MS = TUN("doneTtlMs", 10 * 60 * 1000);
-const MAX_ATTEMPTS = TUN("maxAttempts", 24);
-const RETRY_DELAYS = TUN("retryDelays", [1500, 3000, 6000, 10000, 15000, 20000]);
-const UPSTREAM_STALL_MS = TUN("stallMs", 60 * 1000);
-const STALE_LOCK_MS = TUN("staleLockMs", 26 * 1000);
-const FLUSH_MS = TUN("flushMs", 2000);
-const FLUSH_BYTES = TUN("flushBytes", 64 * 1024);
-const TICK_BUDGET_MS = TUN("tickBudgetMs", 210 * 1000);
-const EVENT_BUDGET_MS = TUN("eventBudgetMs", 10 * 60 * 1000);
-const TAIL_POLL_FAST = TUN("tailPollFast", 500);
-const TAIL_POLL_SLOW = TUN("tailPollSlow", 2000);
-const MAX_ACTIVE_JOBS = 64;
-
-const FWD_HEADERS = ["authorization", "content-type", "http-referer", "x-title", "accept"];
-
-/* server-side continue protocol — the EXACT instruction the app sends,
-   so worker retries and app continues are interchangeable */
-const CONTINUE_INSTRUCTION = "Your previous answer was cut off by a connection drop. Continue exactly where you stopped. Do not repeat any text you already wrote, do not apologize, just continue the content seamlessly.";
-
-const CORS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Authorization, Content-Type, HTTP-Referer, X-Title",
-  "Access-Control-Expose-Headers": "X-Nexus-Job",
-  "Access-Control-Max-Age": "86400",
-};
-
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-
-function json(data, status = 200, headers = {}) {
-  return new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json", ...CORS, ...headers } });
-}
-
-/* ---------- upstream base/path (v2 fix preserved) ---------- */
-function upstreamBase(env) {
-  return ((env && env.NEXUS_UPSTREAM_BASE) || "https://openrouter.ai/api/v1").replace(/\/+$/, "");
-}
-function headersFrom(fwd) {
-  const h = new Headers();
-  for (const k of FWD_HEADERS) { const v = fwd && fwd[k]; if (v) h.set(k, v); }
-  if (!h.has("content-type")) h.set("content-type", "application/json");
-  return h;
-}
-function backoffFor(attempts) {
-  const d = RETRY_DELAYS[Math.min(Math.max(attempts - 1, 0), RETRY_DELAYS.length - 1)];
-  return Math.round(d * (0.8 + Math.random() * 0.4));
-}
-
-/* =====================================================================
-   D1 layer — the durable half of the engine.
-   Uses ONLY prepare().bind().run()/all() (the portable subset), so the
-   exact same worker file runs under the local Bun test harness with a
-   bun:sqlite shim, and under real Cloudflare with real D1.
-   ===================================================================== */
-const SCHEMA_SQL = [
-  `CREATE TABLE IF NOT EXISTS jobs (
-     id TEXT PRIMARY KEY,
-     kind TEXT NOT NULL DEFAULT 'chat',
-     status TEXT NOT NULL DEFAULT 'queued',
-     created_at INTEGER NOT NULL,
-     updated_at INTEGER NOT NULL,
-     heartbeat INTEGER NOT NULL DEFAULT 0,
-     next_retry INTEGER NOT NULL DEFAULT 0,
-     attempts INTEGER NOT NULL DEFAULT 0,
-     finish INTEGER NOT NULL DEFAULT 0,
-     bytes INTEGER NOT NULL DEFAULT 0,
-     content_text TEXT NOT NULL DEFAULT '',
-     req TEXT,
-     meta TEXT,
-     lock_token TEXT
-   )`,
-  `CREATE TABLE IF NOT EXISTS chunks (
-     job TEXT NOT NULL,
-     seq INTEGER NOT NULL,
-     bytes INTEGER NOT NULL,
-     data TEXT NOT NULL,
-     PRIMARY KEY (job, seq)
-   )`,
-  `CREATE TABLE IF NOT EXISTS secrets (
-     job TEXT PRIMARY KEY,
-     auth TEXT NOT NULL
-   )`,
-  `CREATE TABLE IF NOT EXISTS wstate (
-     k TEXT PRIMARY KEY,
-     v TEXT NOT NULL
-   )`,
-  `CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs (status, next_retry)`,
+/* z.ai first-party family (suffix match — covers subdomains) */
+const ALLOW = [
+  'z.ai',               // chat.z.ai, zcode.z.ai, *.space-z.ai sandboxes, ...
+  'chatglm.cn',         // z-cdn.chatglm.cn (frontend assets), z-cdn-media, cdn-proxy, sdata
+  'chatglm.site',       // artifacts-cdn, adapter-prod, test envs
+  'glm-chat.oss-cn-hongkong.aliyuncs.com' // file upload/download bucket
 ];
 
-function hasDB(env) { return !!(env && env.DB); }
-
-let schemaDone = false;
-async function ensureSchema(env) {
-  if (!hasDB(env) || schemaDone) return;
-  for (const s of SCHEMA_SQL) await runSQL(env, s, []);
-  schemaDone = true;
+/* upstream origin for the /chat route (env CHAT_UPSTREAM overrides, e.g. for staging) */
+function chatUpstream(event) { return envOf(event).CHAT_UPSTREAM || 'https://chat.z.ai'; }
+function chatHost(event) {
+  try { return new URL(chatUpstream(event)).host; } catch (e) { return 'chat.z.ai'; }
 }
 
-async function runSQL(env, sql, params) {
-  const p = env.DB.prepare(sql);
-  const b = params && params.length ? p.bind(...params) : p;
-  return b.run();
-}
-async function allSQL(env, sql, params) {
-  const p = env.DB.prepare(sql);
-  const b = params && params.length ? p.bind(...params) : p;
-  const r = await b.all();
-  return (r && r.results) || [];
-}
-async function getSQL(env, sql, params) {
-  const rows = await allSQL(env, sql, params);
-  return rows.length ? rows[0] : null;
-}
-async function wstateSet(env, k, v) {
-  await runSQL(env, `INSERT INTO wstate (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v`, [k, String(v)]);
-}
-async function wstateGet(env, k) {
-  const r = await getSQL(env, `SELECT v FROM wstate WHERE k = ?`, [k]);
-  return r ? Number(r.v) || 0 : 0;
-}
+/* markers filled by the build script */
+const PATCH_JS = "/* ============================================================\n * z.ai pocket \u2014 runtime patch\n * Injected by the proxy worker into every proxied HTML document\n * as the FIRST script inside <head>. It rewrites every network\n * call, navigation and popup so the SPA believes it lives on its\n * real origin while every byte actually flows through the worker.\n *\n * NOTE: this source is embedded inside a <script> tag in proxied\n * pages, so it must never contain the literal sequence \"</scr\" +\n * \"ipt>\" \u2014 keep it that way.\n * ============================================================ */\n(function () {\n  'use strict';\n  if (window.__ZAI_PATCHED__) return;\n  window.__ZAI_PATCHED__ = true;\n\n  var CFG = window.__ZAI__ || {};\n  var PFX = CFG.pfx || '';            // proxy prefix for this document, e.g. \"/chat\" or \"/p/z-cdn.chatglm.cn\"\n  var HOST = (CFG.host || '').toLowerCase(); // upstream host this document belongs to\n  var WORKER = CFG.worker || '';      // worker origin, e.g. https://name.workers.dev\n  var TOKEN = CFG.token || '';        // optional shared proxy token\n  var ALLOW = CFG.allow || [];        // allowlisted host suffixes\n\n  var jar = [];                       // fallback cookie jar (mirrored by the shell)\n  var lsMirror = {};                  // fallback localStorage mirror (for browsers that block it in iframes)\n  var upQueue = [];\n\n  /* ---------- messaging ---------- */\n  function up(msg) {\n    try {\n      msg.zai = 1;\n      if (window.parent && window.parent !== window) window.parent.postMessage(msg, '*');\n    } catch (e) { /* ignore */ }\n  }\n\n  /* ---------- host matching ---------- */\n  function allowedHost(h) {\n    h = (h || '').toLowerCase().replace(/\\.$/, '');\n    if (!h) return false;\n    for (var i = 0; i < ALLOW.length; i++) {\n      var a = String(ALLOW[i]).toLowerCase();\n      if (h === a || h.slice(-(a.length + 1)) === '.' + a) return true;\n    }\n    return false;\n  }\n\n  /* ---------- proxy-path bookkeeping ----------\n   * Guards against double-prefixing and recognises URLs that already\n   * point at the worker (same-origin) instead of the upstream host.\n   */\n  function originStr() {\n    try { return location.origin || (location.protocol + '//' + location.host); } catch (e) { return ''; }\n  }\n  function hasPfx(str) {\n    if (!PFX) return true;\n    if (str === PFX) return true;\n    return str.indexOf(PFX) === 0 && /^[\\/?#;]/.test(str.charAt(PFX.length));\n  }\n  function isCrossHostPath(str) { // \"/p/<allowlisted host>/\u2026\"\n    if (/^\\/p\\//.test(str)) {\n      var h = str.slice(3).split(/[\\/?#]/)[0].toLowerCase();\n      if (allowedHost(h)) return true;\n    }\n    return false;\n  }\n  function isProxyPath(p) {\n    if (!p) return false;\n    if (hasPfx(p)) return true;\n    if (isCrossHostPath(p)) return true;\n    if (/^\\/__(status|clear)([\\/?#]|$)/.test(p)) return true;\n    return false;\n  }\n\n  /* ---------- URL mapping ----------\n   * absolute / protocol-relative allowlisted URLs -> proxy paths\n   * same-origin (worker) absolute URLs -> normalised proxy paths\n   * root-absolute paths -> PFX + path  (they belong to this doc's upstream host)\n   * relative / data: / blob: / #...   -> untouched\n   */\n  function mapUrl(u) {\n    try {\n      if (u == null) return u;\n      if (typeof u === 'object' && u instanceof URL) {\n        var s = mapUrl(u.href);\n        return s;\n      }\n      if (typeof u !== 'string') return u;\n      var str = u.trim();\n      if (!str) return str;\n      if (/^(data|blob|about|javascript|mailto|tel|sms|intent|ms-|chrome|file|ws|wss):/i.test(str)) {\n        // wss/ws handled by the WebSocket wrapper below; here pass through\n        return str;\n      }\n      if (str.charAt(0) === '#') return str;\n      var m;\n      if ((m = str.match(/^https?:\\/\\/([^\\/?#]+)/i))) {\n        var host = m[1].toLowerCase();\n        var org = originStr();\n        if (org && (str === org || str.indexOf(org + '/') === 0)) {\n          // same-origin (worker) absolute URL \u2014 either already proxied\n          // (\"/chat/\u2026\", \"/p/host/\u2026\") or a bare worker-root path that\n          // still belongs to this document's upstream\n          var sp = str.slice(org.length) || '/';\n          if (isProxyPath(sp)) return sp;\n          return PFX + sp;\n        }\n        if (!allowedHost(host)) return str;                    // external: leave (usually analytics)\n        var rest = str.slice(m[0].length) || '/';\n        if (host === HOST) return PFX + rest;\n        return '/p/' + host + rest;\n      }\n      if ((m = str.match(/^\\/\\/([^\\/?#]+)/))) {\n        var h2 = m[1].toLowerCase();\n        if (!allowedHost(h2)) return str;\n        var rest2 = str.slice(m[0].length) || '/';\n        if (h2 === HOST) return PFX + rest2;\n        return '/p/' + h2 + rest2;\n      }\n      if (str.charAt(0) === '/' && str.charAt(1) !== '/') {\n        if (hasPfx(str)) return str;          // already carries this doc's proxy prefix\n        if (isCrossHostPath(str)) return str; // already a /p/<host>/ proxy path\n        return PFX + str;\n      }\n      return str; // relative \u2192 resolves against the proxied document URL\n    } catch (e) { return u; }\n  }\n\n  /* ---------- cookies ---------- */\n  function docCookies() {\n    var out = [];\n    try {\n      (document.cookie || '').split(';').forEach(function (kv) {\n        kv = kv.trim();\n        if (kv) out.push(kv);\n      });\n    } catch (e) { /* ignore */ }\n    return out;\n  }\n\n  function cookieHeader() {\n    var seen = {};\n    var parts = [];\n    docCookies().forEach(function (kv) {\n      var name = kv.split('=')[0];\n      if (!seen[name]) { seen[name] = 1; parts.push(kv); }\n    });\n    jar.forEach(function (c) {\n      if (c && c.name && !seen[c.name]) { seen[c.name] = 1; parts.push(c.name + '=' + c.value); }\n    });\n    return parts.join('; ');\n  }\n\n  function ingestSetCookie(hdrVal) {\n    try {\n      if (!hdrVal) return;\n      var arr = JSON.parse(decodeURIComponent(hdrVal));\n      if (!Array.isArray(arr)) return;\n      var map = {};\n      jar.forEach(function (c) { map[c.name] = c; });\n      arr.forEach(function (raw) {\n        var bits = String(raw).split(';');\n        var nv = bits[0];\n        var eq = nv.indexOf('=');\n        if (eq < 1) return;\n        var c = { name: nv.slice(0, eq).trim(), value: nv.slice(eq + 1).trim() };\n        for (var i = 1; i < bits.length; i++) {\n          var b = bits[i].trim();\n          var k = b.split('=')[0].toLowerCase();\n          if (k === 'max-age') {\n            var ma = parseInt(b.slice(8), 10);\n            if (ma === 0) { c.del = true; }\n            c.maxAge = ma;\n          }\n        }\n        if (c.del) delete map[c.name];\n        else map[c.name] = c;\n      });\n      jar = [];\n      Object.keys(map).forEach(function (k) { jar.push(map[k]); });\n      up({ type: 'cookies', cookies: jar });\n    } catch (e) { /* ignore */ }\n  }\n\n  function seedDocumentCookies() {\n    jar.forEach(function (c) {\n      try {\n        document.cookie = c.name + '=' + c.value + '; path=/; Max-Age=31536000; Secure; SameSite=None; Partitioned';\n      } catch (e) { /* ignore */ }\n    });\n  }\n\n  /* ---------- header injection ---------- */\n  function applyHeaders(h) {\n    try {\n      var ch = cookieHeader();\n      if (ch && !h.has('x-cookie')) h.set('x-cookie', ch);\n      if (TOKEN && !h.has('x-proxy-token')) h.set('x-proxy-token', TOKEN);\n    } catch (e) { /* ignore */ }\n    return h;\n  }\n\n  /* ---------- fetch ---------- */\n  var _fetch = window.fetch ? window.fetch.bind(window) : null;\n  if (_fetch) {\n    window.fetch = function (input, init) {\n      try {\n        if (input && typeof input === 'object' && typeof input.url === 'string' && input.constructor && input.constructor.name === 'Request') {\n          var mapped = mapUrl(input.url);\n          if (mapped !== input.url) {\n            try { input = new Request(mapped, input); } catch (e2) { /* keep original */ }\n          }\n        } else if (typeof input === 'string' || input instanceof URL) {\n          var u2 = mapUrl(String(input));\n          if (u2 !== String(input)) input = u2;\n        }\n        init = init || {};\n        var H;\n        try { H = (init.headers instanceof Headers) ? init.headers : new Headers(init.headers || {}); }\n        catch (e3) { H = new Headers(); }\n        init.headers = applyHeaders(H);\n        var p = _fetch(input, init);\n        p.then(function (r) {\n          try { ingestSetCookie(r.headers && r.headers.get('x-set-cookie')); } catch (e4) { /* ignore */ }\n        }, function () { /* network error \u2014 swallow */ });\n        return p;\n      } catch (e) {\n        return _fetch(input, init);\n      }\n    };\n  }\n\n  /* ---------- XMLHttpRequest ---------- */\n  try {\n    var _open = XMLHttpRequest.prototype.open;\n    XMLHttpRequest.prototype.open = function (method, url) {\n      try {\n        var mu = mapUrl(String(url));\n        if (mu !== String(url)) {\n          if (arguments.length > 2) {\n            arguments[1] = mu;\n            return _open.apply(this, arguments);\n          }\n          return _open.call(this, method, mu);\n        }\n      } catch (e) { /* ignore */ }\n      return _open.apply(this, arguments);\n    };\n    var _send = XMLHttpRequest.prototype.send;\n    XMLHttpRequest.prototype.send = function () {\n      try {\n        var ch = cookieHeader();\n        if (ch) this.setRequestHeader('x-cookie', ch);\n        if (TOKEN) this.setRequestHeader('x-proxy-token', TOKEN);\n      } catch (e) { /* ignore */ }\n      var xhr = this;\n      try {\n        xhr.addEventListener('loadend', function () {\n          try { ingestSetCookie(xhr.getResponseHeader && xhr.getResponseHeader('x-set-cookie')); } catch (e2) { /* ignore */ }\n        });\n      } catch (e3) { /* ignore */ }\n      return _send.apply(this, arguments);\n    };\n  } catch (e) { /* ignore */ }\n\n  /* ---------- EventSource ---------- */\n  try {\n    if (window.EventSource) {\n      var _ES = window.EventSource;\n      window.EventSource = function (url, cfg) {\n        try { url = mapUrl(String(url)); } catch (e) { /* ignore */ }\n        return new _ES(url, cfg);\n      };\n      window.EventSource.prototype = _ES.prototype;\n    }\n  } catch (e) { /* ignore */ }\n\n  /* ---------- WebSocket ---------- */\n  try {\n    if (window.WebSocket) {\n      var _WS = window.WebSocket;\n      window.WebSocket = function (url, protocols) {\n        try {\n          var s = String(url);\n          var m = s.match(/^(wss?):\\/\\/([^\\/?#]+)(\\/.*)?$/i);\n          if (m) {\n            var host = m[2].toLowerCase();\n            var scheme = m[1].toLowerCase() === 'ws' ? 'ws' : 'wss';\n            if (allowedHost(host)) {\n              var rest = m[3] || '/';\n              var path = (host === HOST ? PFX : '/p/' + host) + rest;\n              if (TOKEN && path.indexOf('__t=') < 0) {\n                path += (path.indexOf('?') < 0 ? '?' : '&') + '__t=' + encodeURIComponent(TOKEN);\n              }\n              url = (location.protocol === 'https:' ? 'wss' : scheme) + '://' + location.host + path;\n            }\n          }\n        } catch (e) { /* ignore */ }\n        return protocols === undefined ? new _WS(url) : new _WS(url, protocols);\n      };\n      window.WebSocket.prototype = _WS.prototype;\n      window.WebSocket.CONNECTING = _WS.CONNECTING;\n      window.WebSocket.OPEN = _WS.OPEN;\n      window.WebSocket.CLOSING = _WS.CLOSING;\n      window.WebSocket.CLOSED = _WS.CLOSED;\n    }\n  } catch (e) { /* ignore */ }\n\n  /* ---------- sendBeacon ---------- */\n  try {\n    if (navigator.sendBeacon) {\n      var _sb = navigator.sendBeacon.bind(navigator);\n      navigator.sendBeacon = function (url, data) {\n        try {\n          var mu = mapUrl(String(url));\n          if (mu !== String(url)) {\n            // beacons cannot carry custom headers; fall back to keepalive fetch\n            return _fetch(mu, { method: 'POST', body: data, keepalive: true, mode: 'no-cors' }) ? true : true;\n          }\n        } catch (e) { /* ignore */ }\n        return _sb(url, data);\n      };\n    }\n  } catch (e) { /* ignore */ }\n\n  /* ---------- navigation reporting ---------- */\n  function curUrl() { return location.pathname + location.search + location.hash; }\n  function reportNav() { up({ type: 'nav', url: curUrl(), title: document.title || '' }); }\n\n  try {\n    var _push = history.pushState;\n    var _replace = history.replaceState;\n    // SPA history entries must stay inside the proxy prefix: a bare\n    // \"/login\" pushed from \"/chat/\" would escape the sandbox on the next\n    // reload, and a cross-origin URL would throw SecurityError outright.\n    function fixHistUrl(u) {\n      try {\n        var s = String(u);\n        if (!s || s.charAt(0) === '#') return s;\n        var org = originStr();\n        if (org && (s === org || s.indexOf(org + '/') === 0)) {\n          var p = s.slice(org.length) || '/';\n          if (isProxyPath(p)) return p;\n          return PFX + p;\n        }\n        var mapped = mapUrl(s);\n        if (/^(https?:)?\\/\\//i.test(mapped)) return curUrl(); // cross-origin \u2192 would throw\n        return mapped;\n      } catch (e) { return u; }\n    }\n    history.pushState = function () {\n      try { if (arguments.length > 2 && arguments[2] != null) arguments[2] = fixHistUrl(arguments[2]); } catch (e2) { /* ignore */ }\n      var r = _push.apply(this, arguments); reportNav(); return r;\n    };\n    history.replaceState = function () {\n      try { if (arguments.length > 2 && arguments[2] != null) arguments[2] = fixHistUrl(arguments[2]); } catch (e2) { /* ignore */ }\n      var r = _replace.apply(this, arguments); reportNav(); return r;\n    };\n    window.addEventListener('popstate', reportNav);\n    window.addEventListener('hashchange', reportNav);\n    window.addEventListener('pageshow', reportNav);\n  } catch (e) { /* ignore */ }\n\n  /* ---------- Navigation API interception (Chrome/Edge) ----------\n   * catches location.href=..., form submits, link clicks \u2014 anything\n   * that would navigate this frame to an absolute or external URL.\n   */\n  try {\n    if (window.navigation && window.navigation.addEventListener) {\n      window.navigation.addEventListener('navigate', function (e) {\n        try {\n          if (!e.canIntercept || !e.destination || e.destination.sameDocument) return;\n          var dest = String(e.destination.url || '');\n          if (!dest) return;\n          var org = originStr();\n          if (org && (dest === org || dest.indexOf(org + '/') === 0)) {\n            // same-origin destination on the worker itself: either an\n            // already-proxied path (proceed natively \u2014 the old code used to\n            // eat these as \"external\") or a bare worker-root path that must\n            // regain this document's proxy prefix\n            var p = dest.slice(org.length) || '/';\n            if (isProxyPath(p)) return;\n            e.preventDefault();\n            location.href = PFX + p;\n            return;\n          }\n          var mapped = mapUrl(dest);\n          if (mapped !== dest) {\n            // z.ai-family absolute URL \u2192 swap for the proxied path\n            e.preventDefault();\n            location.href = mapped;\n            return;\n          }\n          if (/^https?:\\/\\//i.test(dest) || /^\\/\\//.test(dest)) {\n            // external site \u2014 the phone will block it anyway; tell the shell\n            e.preventDefault();\n            up({ type: 'ext', url: dest });\n          }\n          // relative destinations proceed natively\n        } catch (err) { /* ignore */ }\n      });\n    }\n  } catch (e) { /* ignore */ }\n\n  /* ---------- window.open ---------- */\n  function stubWindow() {\n    return {\n      closed: false,\n      close: function () { this.closed = true; },\n      focus: function () {}, blur: function () {},\n      postMessage: function () {},\n      location: { href: 'about:blank', replace: function () {}, assign: function () {} },\n      document: { write: function () {}, open: function () {}, close: function () {}, createElement: function () { return { setAttribute: function () {}, appendChild: function () {} }; } }\n    };\n  }\n  window.open = function (url) {\n    try {\n      var u = url == null ? '' : String(url);\n      if (!u || u === 'about:blank') return stubWindow();\n      var mapped = mapUrl(u);\n      if (mapped !== u) { location.href = mapped; return stubWindow(); }\n      if (/^(https?:)?\\/\\//i.test(u)) { up({ type: 'ext', url: u }); return stubWindow(); }\n      location.href = u;\n      return stubWindow();\n    } catch (e) { return stubWindow(); }\n  };\n\n  /* ---------- click / submit capture (fallback layer) ---------- */\n  document.addEventListener('click', function (e) {\n    try {\n      if (e.defaultPrevented || (e.button !== undefined && e.button !== 0)) return;\n      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;\n      var el = e.target;\n      var a = el && el.closest ? el.closest('a[href]') : null;\n      if (!a) return;\n      var href = a.getAttribute('href') || '';\n      if (!href || href.charAt(0) === '#' || /^(data|blob|javascript|mailto|tel):/i.test(href)) return;\n      var target = (a.target || '').toLowerCase();\n      var mapped = mapUrl(href);\n      if (mapped !== href) {\n        if (target === '_top' || target === '_parent' || target === '_blank') {\n          e.preventDefault();\n          location.href = mapped;\n        } else {\n          a.setAttribute('href', mapped); // let native navigation use the proxied href\n        }\n        return;\n      }\n      if (/^(https?:)?\\/\\//i.test(href)) {\n        e.preventDefault();\n        up({ type: 'ext', url: href });\n        return;\n      }\n      if (target === '_top' || target === '_parent') {\n        e.preventDefault();\n        location.href = href;\n      }\n    } catch (err) { /* ignore */ }\n  }, true);\n\n  document.addEventListener('submit', function (e) {\n    try {\n      var f = e.target;\n      if (!f || !f.getAttribute) return;\n      var action = f.getAttribute('action') || '';\n      if (action) {\n        var mapped = mapUrl(action);\n        if (mapped !== action) f.setAttribute('action', mapped);\n      }\n      var target = (f.target || '').toLowerCase();\n      if (target === '_top' || target === '_parent' || target === '_blank') {\n        e.preventDefault();\n        var dest = f.getAttribute('action') || curUrl();\n        if (/^(https?:)?\\/\\//i.test(dest) && mapUrl(dest) === dest) { up({ type: 'ext', url: dest }); return; }\n        location.href = dest;\n      }\n    } catch (err) { /* ignore */ }\n  }, true);\n\n  /* ---------- service worker: never register ----------\n   * a SW would bypass every patch we installed.\n   */\n  try {\n    if (navigator.serviceWorker && navigator.serviceWorker.register) {\n      navigator.serviceWorker.register = function () {\n        return Promise.resolve({ scope: '/', active: null, installing: null, waiting: null, unregister: function () { return Promise.resolve(true); }, addEventListener: function () {}, state: 'activated' });\n      };\n    }\n  } catch (e) { /* ignore */ }\n\n  /* ---------- analytics shims (their hosts are blocked anyway) ---------- */\n  window.dataLayer = window.dataLayer || [];\n  window.gtag = window.gtag || function () { window.dataLayer.push(arguments); };\n\n  /* ---------- localStorage fallback for browsers that block it in iframes ----------\n   * backed by the shell through postMessage so sessions survive reloads.\n   */\n  (function setupStorage() {\n    function usable(store) {\n      try {\n        var k = '__zai_probe__';\n        store.setItem(k, '1');\n        store.removeItem(k);\n        return true;\n      } catch (e) { return false; }\n    }\n    function makeShim(name) {\n      var mem = (name === 'localStorage') ? lsMirror : {};\n      return {\n        getItem: function (k) { return Object.prototype.hasOwnProperty.call(mem, k) ? mem[k] : null; },\n        setItem: function (k, v) { mem[k] = String(v); up({ type: 'ls', store: name, k: String(k), v: String(v) }); },\n        removeItem: function (k) { delete mem[k]; up({ type: 'ls', store: name, k: String(k), v: null }); },\n        clear: function () { mem = {}; up({ type: 'ls', store: name, k: '__clear__', v: null }); },\n        key: function (i) { return Object.keys(mem)[i] || null; }\n      };\n    }\n    ['localStorage', 'sessionStorage'].forEach(function (name) {\n      try {\n        if (!usable(window[name])) {\n          Object.defineProperty(window, name, { value: makeShim(name), configurable: true, writable: false });\n        }\n      } catch (e) { /* ignore */ }\n    });\n  })();\n\n  /* ---------- title watcher ---------- */\n  function watchTitle() {\n    try {\n      var t = document.querySelector('title');\n      if (t && window.MutationObserver) {\n        new MutationObserver(reportNav).observe(t, { childList: true, characterData: true, subtree: true });\n      }\n    } catch (e) { /* ignore */ }\n  }\n  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', watchTitle);\n  else watchTitle();\n\n  /* ---------- error forwarding (diagnostics) ---------- */\n  var errCount = 0;\n  window.addEventListener('error', function (e) {\n    if (errCount++ < 10) up({ type: 'err', msg: String((e && e.message) || e).slice(0, 300) });\n  });\n\n  /* ---------- shell commands ---------- */\n  window.addEventListener('message', function (e) {\n    try {\n      var d = e.data;\n      if (!d || d.zai !== 1 || !d.cmd) return;\n      if (e.origin !== 'null' && WORKER && e.origin !== WORKER) return;\n      switch (d.cmd) {\n        case 'init':\n          jar = Array.isArray(d.jar) ? d.jar : [];\n          if (d.ls) {\n            Object.keys(d.ls).forEach(function (k) {\n              if (!(k in lsMirror)) lsMirror[k] = d.ls[k];\n            });\n          }\n          seedDocumentCookies();\n          reportNav();\n          break;\n        case 'back': history.back(); break;\n        case 'forward': history.forward(); break;\n        case 'reload': location.reload(); break;\n        case 'navigate':\n          if (d.url) location.href = mapUrl(String(d.url));\n          break;\n        case 'getstate': reportNav(); break;\n      }\n    } catch (err) { /* ignore */ }\n  });\n\n  /* ---------- boot ---------- */\n  up({ type: 'hello', url: curUrl(), title: document.title || '' });\n  reportNav();\n})();\n";
 
-function rowToJob(row) {
-  if (!row) return null;
-  let meta = {};
-  try { meta = row.meta ? JSON.parse(row.meta) : {}; } catch (_) {}
-  let req = null;
-  try { req = row.req ? JSON.parse(row.req) : null; } catch (_) {}
-  return {
-    id: row.id, kind: row.kind, status: row.status,
-    createdAt: Number(row.created_at), updatedAt: Number(row.updated_at),
-    heartbeat: Number(row.heartbeat), nextRetry: Number(row.next_retry),
-    attempts: Number(row.attempts), finish: !!Number(row.finish),
-    bytes: Number(row.bytes), contentText: row.content_text || "",
-    req, meta,
-  };
-}
-async function getJobRow(env, id) {
-  const r = await getSQL(env, `SELECT * FROM jobs WHERE id = ?`, [id]);
-  return r ? rowToJob(r) : null;
-}
+/* ============================================================ */
 
-/* lock-guarded write — fails (returns 0) once another driver took over */
-async function lockWrite(env, id, token, fields) {
-  const keys = Object.keys(fields);
-  if (!keys.length) return 1;
-  const sets = keys.map(k => k + " = ?").join(", ");
-  const params = keys.map(k => fields[k]);
-  params.push(id, token);
-  const sql = `UPDATE jobs SET ` + sets + ` WHERE id = ? AND lock_token = ?`;
+addEventListener('fetch', (event) => {
+  event.respondWith(handle(event.request, event));
+});
+
+async function handle(req, event) {
   try {
-    const r = await runSQL(env, sql, params);
-    return r && r.meta && Number(r.meta.changes) || 0;
-  } catch (_) { return 0; }
-}
+    const url = new URL(req.url);
+    const method = req.method.toUpperCase();
 
-/* v5: the pump heartbeat period — the liveness clock. A live pump's D1
-   heartbeat is never older than ~1 beat: the interval beats through
-   backoff sleeps and slow first tokens, and every flush refreshes it.
-   The beat rate is tied to the staleness threshold (STALE_LOCK/3, min
-   250ms) so a live pump is NEVER stealable mid-run. (v4's fixed 2s beat
-   lagged tuned staleness windows — the cron stole live jobs and the
-   loser's liveAbort then killed the winner's shared abort handle →
-   endless re-generation churn.) */
-function heartPeriodMs() {
-  return Math.max(250, Math.min(Math.floor(FLUSH_MS / 2), Math.floor(STALE_LOCK_MS / 3)));
-}
-
-/* the atomic claim — the heart of "no double generation" */
-async function claimJob(env, id) {
-  const token = crypto.randomUUID();
-  const now = Date.now();
-  const r = await runSQL(env,
-    `UPDATE jobs SET status = 'streaming', lock_token = ?, heartbeat = ?, updated_at = ? WHERE id = ? AND status IN ('queued','streaming') AND heartbeat < ? AND next_retry <= ?`,
-    [token, now, now, id, now - STALE_LOCK_MS, now]);
-  const changes = r && r.meta && Number(r.meta.changes) || 0;
-  return changes === 1 ? token : null;
-}
-
-async function deleteJobRows(env, id) {
-  await runSQL(env, `DELETE FROM chunks WHERE job = ?`, [id]);
-  await runSQL(env, `DELETE FROM secrets WHERE job = ?`, [id]);
-  await runSQL(env, `DELETE FROM jobs WHERE id = ?`, [id]);
-}
-
-/* =====================================================================
-   SSE parser — stateless construction, so ANY event context can rebuild
-   the full job state by replaying the D1 chunk log (byte-exact).
-   ===================================================================== */
-function makeParser() {
-  return {
-    dec: new TextDecoder(),
-    pending: "",
-    chunkStartByte: 0,
-    contentText: "",
-    eventIndex: [],        // [{c: contentLen, b: byteOffAfterLine}]
-    sawToolCalls: false,
-    sawReasoning: false,    // v5: reasoning deltas are real data (the app accumulates them)
-    finishSeen: false,
-    feed(u8) {
-      const text = this.dec.decode(u8, { stream: true });
-      const nl = [];
-      for (let i = 0; i < u8.length; i++) if (u8[i] === 0x0A) nl.push(i);
-      const lines = text.split("\n"); // lines.length === nl.length + 1
-      let line = this.pending + lines[0];
-      for (let i = 0; i < nl.length; i++) {
-        const lineEndByte = this.chunkStartByte + nl[i] + 1;
-        this.line(line, lineEndByte);
-        line = lines[i + 1];
-      }
-      this.pending = line;
-      this.chunkStartByte += u8.length;
-    },
-    line(line, lineEndByte) {
-      if (!line) return;
-      const s = line.endsWith("\r") ? line.slice(0, -1) : line;
-      if (!s.startsWith("data:")) return;
-      const raw = s.slice(5).trim();
-      if (!raw) return;
-      if (raw === "[DONE]") { this.finishSeen = true; return; }
-      let obj = null;
-      try { obj = JSON.parse(raw); } catch (_) { return; }
-      const ch = obj && obj.choices && obj.choices[0];
-      if (ch && ch.finish_reason) this.finishSeen = true;
-      const d = ch && ch.delta;
-      if (d) {
-        if (typeof d.content === "string" && d.content.length) this.contentText += d.content;
-        if (typeof d.reasoning === "string" && d.reasoning.length) this.sawReasoning = true;
-        if (typeof d.reasoning_content === "string" && d.reasoning_content.length) this.sawReasoning = true;
-        if (Array.isArray(d.tool_calls) && d.tool_calls.length) this.sawToolCalls = true;
-      }
-      this.eventIndex.push({ c: this.contentText.length, b: lineEndByte });
-    },
-    /* claim-time: the buffer may end mid-line. If that trailing line is a
-       COMPLETE JSON event (the pump died right before its newline),
-       count it — the app-side parser does exactly that when its stream
-       ends. Both sides then agree on the partial text. */
-    flushPending() {
-      if (!this.pending) return;
-      const s = this.pending.endsWith("\r") ? this.pending.slice(0, -1) : this.pending;
-      this.pending = "";
-      if (!s.startsWith("data:")) return;
-      const raw = s.slice(5).trim();
-      if (!raw) return;
-      this.line("data: " + raw, this.chunkStartByte);
-    },
-    boundaryFor(contentLen) {
-      if (contentLen <= 0) return 0;
-      const idx = this.eventIndex;
-      for (let i = idx.length - 1; i >= 0; i--) if (idx[i].c === contentLen) return idx[i].b;
-      return -1;
-    },
-    totalBytes() { return this.chunkStartByte; },
-  };
-}
-
-/* rebuild a job's byte buffer from the D1 chunk log (byte-exact) */
-async function readAllChunkBytes(env, id) {
-  const rows = await allSQL(env, `SELECT data FROM chunks WHERE job = ? ORDER BY seq ASC`, [id]);
-  const enc = new TextEncoder();
-  const parts = [];
-  let total = 0;
-  for (const r of rows) { const u8 = enc.encode(r.data); parts.push(u8); total += u8.length; }
-  const out = new Uint8Array(total);
-  let off = 0;
-  for (const p of parts) { out.set(p, off); off += p.length; }
-  return out;
-}
-
-/* =====================================================================
-   Live registry — in-isolate fan-out for the client that is watching
-   right now (zero D1 latency), plus the abort handle used by DELETE
-   and by the local harness to simulate Cloudflare's context teardown.
-   ===================================================================== */
-const liveMap = globalThis.__nexusLive || (globalThis.__nexusLive = new Map());
-function liveFor(id) {
-  let l = liveMap.get(id);
-  if (!l) {
-    l = { id, subs: new Set(), chunks: [], total: 0, done: false, hasPump: false, abortCtl: null };
-    liveMap.set(id, l);
-  }
-  return l;
-}
-function livePush(live, u8) {
-  if (live.total + u8.length <= MAX_JOB_BYTES) {
-    live.chunks.push(u8);
-    live.total += u8.length;
-  }
-  for (const c of [...live.subs]) {
-    try { c.enqueue(u8); } catch (_) { live.subs.delete(c); }
-  }
-}
-function liveClose(live) {
-  live.done = true;
-  for (const c of [...live.subs]) { try { c.close(); } catch (_) {} }
-  live.subs.clear();
-}
-/* simulate the runtime killing the pump: subscribers are closed, the D1
-   job is left stale (heartbeat frozen) so the next driver claims it */
-function liveAbort(live) {
-  try { live.abortCtl && live.abortCtl.abort(); } catch (_) {}
-  for (const c of [...live.subs]) { try { c.close(); } catch (_) {} }
-  live.subs.clear();
-  live.hasPump = false;
-}
-function bufferedFromLive(live, offset) {
-  if (offset >= live.total) return new Uint8Array(0);
-  const out = new Uint8Array(live.total - offset);
-  let pos = 0, written = 0;
-  for (const c of live.chunks) {
-    if (pos + c.length <= offset) { pos += c.length; continue; }
-    const skip = Math.max(0, offset - pos);
-    out.set(c.subarray(skip), written);
-    written += c.length - skip;
-    pos += c.length;
-  }
-  return out;
-}
-function liveSubscriber(live, startOffset) {
-  let ctl = null;
-  return new ReadableStream({
-    start(controller) {
-      ctl = controller;
-      const buffered = bufferedFromLive(live, startOffset);
-      if (buffered.length) { try { controller.enqueue(buffered); } catch (_) {} }
-      if (live.done) { try { controller.close(); } catch (_) {} return; }
-      live.subs.add(controller);
-    },
-    cancel() { live.subs.delete(ctl); }, // client left — the job keeps going in D1
-  });
-}
-
-/* =====================================================================
-   THE PUMP — one discrete attempt loop for one job.
-   Runs inside whatever event claimed the job (POST /chat, a reconnect
-   piggyback, or the cron tick). Every byte fans out to live subscribers
-   AND flushes to D1, so the next driver can always pick up exactly
-   where this one died.
-   ===================================================================== */
-async function driveJob(env, ctx, jobId, opts = {}) {
-  if (!hasDB(env)) return;
-  const live = liveFor(jobId);
-  const token = await claimJob(env, jobId);
-  if (!token) return; // another driver owns it — that's the whole race safety
-  live.hasPump = true;
-  if (opts.cron) live.__cron = true; // v5: cron-driven pumps are exempt from request-context teardown models
-  live.abortCtl = new AbortController();
-  const signal = live.abortCtl.signal;
-  try {
-    await pumpLoop(env, jobId, token, live, signal, opts);
-  } catch (_) { /* a dead pump must never throw into the event */ }
-  finally {
-    if (live.abortCtl && live.abortCtl.signal === signal) live.hasPump = false;
-  }
-}
-
-async function pumpLoop(env, jobId, token, live, signal, opts) {
-  let job = await getJobRow(env, jobId);
-  if (!job) return;
-
-  /* ---- rebuild parse state (byte-exact) ---- */
-  const parser = makeParser();
-  if (live.total >= job.bytes && (live.chunks.length || job.bytes === 0)) {
-    /* this isolate already saw every flushed byte (and maybe more) —
-       the in-memory log is a superset of D1 */
-    for (const c of live.chunks) parser.feed(c);
-    parser.flushPending();
-  } else {
-    const all = await readAllChunkBytes(env, jobId);
-    parser.feed(all);
-    parser.flushPending();
-  }
-  if (parser.finishSeen || job.finish) { await finalizeDone(env, jobId, token, live); return; }
-
-  let totalBytes = Math.max(parser.totalBytes(), 0);
-  let attempts = job.attempts;      // total across all drivers (persisted)
-  let inlineAttempts = 0;           // attempts driven by THIS event
-  const maxInline = opts.maxAttempts || 4;
-  const deadline = Date.now() + (opts.budgetMs || EVENT_BUDGET_MS);
-  let firstUpstream = opts.firstUpstream || null;
-
-  let seq = 0;
-  {
-    const r = await getSQL(env, `SELECT COALESCE(MAX(seq), -1) AS mx FROM chunks WHERE job = ?`, [jobId]);
-    seq = r ? Number(r.mx) + 1 : 0;
-  }
-
-  const flushDec = new TextDecoder();
-  let pendingFlush = "";
-  let pendingBytes = 0;
-  let lastFlushAt = Date.now();
-  let separatorNeeded = totalBytes > 0; // a continuation must start line-aligned
-  let lastByte = 0x0A;
-  { // probe the true last byte of the current buffer
-    if (live.chunks.length) {
-      const last = live.chunks[live.chunks.length - 1];
-      lastByte = last[last.length - 1];
-    } else if (totalBytes > 0) {
-      const all = await readAllChunkBytes(env, jobId);
-      if (all.length) lastByte = all[all.length - 1];
+    /* ---- CORS preflight ---- */
+    if (method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: corsHeaders(req, new Headers()) });
     }
-  }
 
-  const flush = async () => {
-    if (!pendingFlush) return true;
-    const text = pendingFlush;
-    pendingFlush = ""; pendingBytes = 0;
-    const byteLen = new TextEncoder().encode(text).length;
+    /* ---- public endpoints ---- */
+    if (url.pathname === '/__status') {
+      const env = envOf(event);
+      const token = env.PROXY_TOKEN || '';
+      let tokenOk = null;
+      if (token) {
+        const supplied = url.searchParams.has('__t') || req.headers.get('x-proxy-token') != null;
+        if (supplied) tokenOk = (url.searchParams.get('__t') === token || req.headers.get('x-proxy-token') === token);
+      }
+      return json({ ok: true, name: VERSION, time: new Date().toISOString(), token_required: !!token, token_ok: tokenOk }, req);
+    }
+    if (url.pathname === '/' || url.pathname === '/index.html') {
+      return landing(event);
+    }
+    if (url.pathname === '/favicon.ico') {
+      return new Response(FAVICON_SVG, { headers: { 'content-type': 'image/svg+xml', 'cache-control': 'public, max-age=86400' } });
+    }
+
+    /* ---- token gate ---- */
+    const env = envOf(event);
+    const token = env.PROXY_TOKEN || '';
+    if (token && !(await checkToken(req, url, token))) {
+      return json({ error: 'unauthorized', hint: 'set X-Proxy-Token header or __t query param' }, req, 401);
+    }
+
+    /* ---- session cookie clear ---- */
+    if (url.pathname === '/__clear') {
+      const names = (url.searchParams.get('names') || '').split(',').map((s) => s.trim()).filter(Boolean);
+      const h = new Headers({ location: '/chat/', 'content-type': 'text/html' });
+      names.forEach((n) => h.append('set-cookie', n + '=; Path=/; Max-Age=0; Secure; SameSite=None; Partitioned'));
+      h.append('set-cookie', '__zai_t=; Path=/; Max-Age=0; Secure; SameSite=None; Partitioned');
+      const out = corsHeaders(req, h);
+      return new Response(null, { status: 302, headers: out });
+    }
+
+    /* ---- websocket upgrade ---- */
+    if (req.headers.get('upgrade') === 'websocket') {
+      return proxyWebsocket(req, url, event);
+    }
+
+    /* ---- route resolution ---- */
+    let pfx = null;      // proxy prefix for this document, e.g. "/chat" or "/p/z-cdn.chatglm.cn"
+    let upstream = null; // absolute upstream URL
+    let host = null;     // upstream host
+
+    if (url.pathname === '/chat' || url.pathname.startsWith('/chat/')) {
+      host = chatHost(event);
+      pfx = '/chat';
+      upstream = chatUpstream(event) + url.pathname.slice('/chat'.length) + url.search;
+    } else if (url.pathname.startsWith('/p/')) {
+      const rest = url.pathname.slice(3); // "<host>/path..."
+      const slash = rest.indexOf('/');
+      host = slash < 0 ? rest : rest.slice(0, slash);
+      const path = slash < 0 ? '/' : rest.slice(slash);
+      if (!hostAllowed(host)) {
+        return json({ error: 'host not allowed', host: host, allowed_suffixes: allowList(event) }, req, 403);
+      }
+      pfx = '/p/' + host;
+      upstream = 'https://' + host + path + url.search;
+    } else {
+      return json({ error: 'unknown route', hint: 'use /chat/ or /p/<host>/ — open the worker root / for help' }, req, 404);
+    }
+
+    /* ---- strip proxy token from query ---- */
+    const upUrl = new URL(upstream);
+    if (upUrl.searchParams.has('__t')) upUrl.searchParams.delete('__t');
+
+    /* ---- build upstream request ---- */
+    const h = new Headers();
+    const skipReq = new Set(['host', 'origin', 'referer', 'cookie', 'connection', 'keep-alive', 'upgrade',
+      'proxy-connection', 'te', 'trailer', 'transfer-encoding', 'content-length', 'accept-encoding',
+      'x-cookie', 'x-proxy-token', 'x-set-cookie']);
+    for (const [k, v] of req.headers) {
+      if (!skipReq.has(k.toLowerCase())) h.set(k, v);
+    }
+    h.set('accept-encoding', 'gzip, deflate, br');
+    h.set('cookie', mergeCookies(req.headers.get('cookie') || '', req.headers.get('x-cookie') || ''));
+    h.set('origin', 'https://' + host);
+    h.set('referer', 'https://' + host + '/');
+
+    let body = undefined;
+    let needDuplex = false;
+    if (method !== 'GET' && method !== 'HEAD') {
+      const cl = parseInt(req.headers.get('content-length') || '0', 10);
+      if (cl > 0 && cl < 32 * 1024 * 1024) {
+        body = await req.arrayBuffer(); // keeps Content-Length intact (important for OSS uploads)
+        h.set('content-length', String(body.byteLength));
+      } else {
+        body = req.body; // stream big/unknown-size uploads
+        needDuplex = true;
+      }
+    }
+
+    let res;
     try {
-      await runSQL(env, `INSERT INTO chunks (job, seq, bytes, data) VALUES (?, ?, ?, ?)`, [jobId, seq, byteLen, text]);
-      seq++;
-      const w = await lockWrite(env, jobId, token, {
-        bytes: totalBytes, content_text: parser.contentText,
-        finish: parser.finishSeen ? 1 : 0,
-        heartbeat: Date.now(), updated_at: Date.now(),
-      });
-      if (w !== 1) return false; // lock lost — another driver took over
-    } catch (_) { return !signal.aborted; }
-    lastFlushAt = Date.now();
-    return true;
-  };
-
-  /* v5 — HONEST PROGRESS BYTES. Retry/deferral notices are SSE comments
-     (`: nexus ...`). They are REAL buffer bytes: livePush'd to attached
-     subscribers, parser-fed (skipped — only `data:` lines matter), and
-     flushed to D1 so every later driver/tail replays them byte-exactly. The
-     app counts them in its byte offset (kept consistent on both sides) but
-     its SSE parser skips comment lines — and its stall watchdog gets fed,
-     so a client watching a retry storm sees a live stream, never a silent
-     60-second freeze. NEVER injected into images bodies (pure JSON). */
-  const emitRaw = (text, immediate) => {
-    if (!text || totalBytes > MAX_JOB_BYTES) return true;
-    const pre = lastByte === 0x0A ? "" : "\n\n"; // line-align before appending
-    const full = pre + text;
-    const u8 = new TextEncoder().encode(full);
-    livePush(live, u8);
-    parser.feed(u8);
-    pendingFlush += full;
-    pendingBytes += u8.length;
-    totalBytes += u8.length;
-    lastByte = 0x0A;
-    if (immediate) return flush();
-    return true;
-  };
-  const emitNote = (text, immediate) => emitRaw(": nexus " + text + "\n\n", immediate);
-
-  /* heartbeat while a slow first token takes its time — keeps other
-     drivers from falsely claiming an alive-but-quiet pump.
-     v5: the beat rate is tied to the staleness threshold (STALE_LOCK/3,
-     min 250ms) so a live pump is NEVER stealable, even mid-backoff-sleep
-     or during a slow first token. (v4's fixed 2s beat lagged tuned
-     staleness windows — the cron stole live jobs and the loser's
-     liveAbort then killed the winner's shared abort handle → churn.) */
-  const heart = setInterval(() => {
-    if (signal.aborted) return;
-    lockWrite(env, jobId, token, { heartbeat: Date.now(), updated_at: Date.now() }).catch(() => {});
-  }, heartPeriodMs());
-
-  let gaveUp = false;
-  try {
-    while (true) {
-      if (signal.aborted) return; // killed like the runtime would — leave D1 stale on purpose
-      if (Date.now() > deadline) { gaveUp = true; break; }
-
-      /* park: tool-call cuts are never continued server-side (app protocol).
-         images never continue either — they re-issue from zero or park. */
-      if (parser.sawToolCalls && !parser.finishSeen) { await parkJob(env, jobId, token); liveClose(live); return; }
-      if (job.kind !== "chat" && totalBytes > 0 && !parser.finishSeen) { await parkJob(env, jobId, token); liveClose(live); return; }
-      if (attempts >= MAX_ATTEMPTS) { await failJob(env, jobId, token, "retry budget used up"); liveClose(live); return; }
-
-      /* ---- build the upstream request ---- */
-      /* v5: continuation vs plain re-issue is decided by REAL DATA, not
-         bytes — a job whose buffer holds only retry comments must re-issue
-         the original prompt, not "continue" from an empty partial.
-         Reasoning deltas count as data: the app accumulates them, and a
-         continuation with a partial that has only reasoning is exactly
-         what the app itself sends in the same situation. */
-      const hasContent = job.kind === "chat"
-        ? (parser.contentText.length > 0 || parser.sawToolCalls || parser.sawReasoning)
-        : totalBytes > 0;
-      let body;
-      if (!hasContent) body = job.req; // plain re-issue
-      else body = {
-        ...job.req,
-        messages: (job.req.messages || []).concat([
-          { role: "assistant", content: parser.contentText },
-          { role: "user", content: CONTINUE_INSTRUCTION },
-        ]),
-        stream: true,
-      };
-
-      const authRow = await getSQL(env, `SELECT auth FROM secrets WHERE job = ?`, [jobId]);
-      const fwd = Object.assign({}, job.meta.fwd || {});
-      if (authRow && authRow.auth) fwd.authorization = authRow.auth;
-
-      const ac = new AbortController();
-      const onOuterAbort = () => { try { ac.abort(); } catch (_) {} };
-      signal.addEventListener("abort", onOuterAbort, { once: true });
-      let lastBeat = Date.now();
-      const wd = setInterval(() => { if (Date.now() - lastBeat > UPSTREAM_STALL_MS) { try { ac.abort(); } catch (_) {} } }, 5000);
-
-      let upstream = null, upstreamErr = null;
-      if (firstUpstream) { upstream = firstUpstream; firstUpstream = null; }
-      else {
-        try {
-          upstream = await fetch(upstreamBase(env) + (job.kind === "chat" ? "/chat/completions" : "/images"), {
-            method: "POST",
-            headers: headersFrom(fwd),
-            body: JSON.stringify(body),
-            signal: ac.signal,
-            // @ts-ignore runtime-specific
-            cf: { cacheTtl: 0 },
-          });
-        } catch (err) { upstreamErr = err; }
-      }
-
-      if (!upstreamErr && upstream && upstream.ok && upstream.body) {
-        /* ---- stream it: fan out + parse + flush ---- */
-        const reader = upstream.body.getReader();
-        let firstChunk = true;
-        let naturalEnd = false;
-        try {
-          while (true) {
-            const res = await reader.read();
-            if (signal.aborted) { try { reader.cancel(); } catch (_) {} return; }
-            if (res.done) { naturalEnd = true; break; }
-            const value = res.value;
-            if (value && value.length) {
-              lastBeat = Date.now();
-              if (firstChunk && separatorNeeded) {
-                if (lastByte !== 0x0A) {
-                  const sep = new Uint8Array([0x0A, 0x0A]); // line-align before a continuation
-                  livePush(live, sep);
-                  parser.feed(sep);
-                  pendingFlush += "\n\n"; pendingBytes += 2;
-                  totalBytes += 2;
-                  lastByte = 0x0A;
-                }
-                separatorNeeded = false;
-              }
-              firstChunk = false;
-              livePush(live, value);
-              parser.feed(value);
-              totalBytes += value.length;
-              if (totalBytes <= MAX_JOB_BYTES) {
-                pendingFlush += flushDec.decode(value, { stream: true });
-                pendingBytes += value.length;
-              }
-              lastByte = value[value.length - 1];
-              if ((Date.now() - lastFlushAt > FLUSH_MS || pendingBytes > FLUSH_BYTES) && totalBytes <= MAX_JOB_BYTES) {
-                /* v5: lock lost = another driver owns this job now — stop
-                   SILENTLY. Never liveAbort here: live/abortCtl are SHARED
-                   with the new owner (same isolate) — aborting them kills
-                   the rightful pump and the client's stream with it. */
-                if (!(await flush())) { try { reader.cancel(); } catch (_) {} clearInterval(wd); signal.removeEventListener("abort", onOuterAbort); return; }
-              }
-            }
-          }
-          const tailText = flushDec.decode();
-          if (tailText) { pendingFlush += tailText; }
-        } catch (_) { /* aborted or the socket died mid-stream → truncated */ }
-        clearInterval(wd);
-        signal.removeEventListener("abort", onOuterAbort);
-        /* v5: lock lost → the new owner streams on; stop silently */
-        if (!(await flush())) { try { reader.cancel(); } catch (_) {} return; }
-        if (parser.finishSeen) { await finalizeDone(env, jobId, token, live); return; }
-        if (naturalEnd && job.kind !== "chat") { await finalizeDone(env, jobId, token, live); return; } // images: full body = done
-        if (signal.aborted) return;
-        /* truncated → persist the attempt count and try again inline
-           (the lock is NOT released: fresh heartbeats prove we're alive,
-           so no other driver can steal the job mid-run) */
-        attempts++; inlineAttempts++;
-        try { await lockWrite(env, jobId, token, { attempts, updated_at: Date.now() }); } catch (_) {}
-        if (job.kind === "chat") {
-          try { await emitNote("answer was truncated — seamlessly continuing (attempt " + (attempts + 1) + "/" + MAX_ATTEMPTS + ")", true); } catch (_) {}
-        }
-        if (inlineAttempts >= maxInline) { gaveUp = true; break; }
-        await sleep(backoffFor(attempts));
-        separatorNeeded = totalBytes > 0;
-        continue;
-      }
-
-      clearInterval(wd);
-      signal.removeEventListener("abort", onOuterAbort);
-      /* ---- the attempt failed to start / was refused ---- */
-      let status = 0, message = "network error";
-      if (upstream) {
-        status = upstream.status;
-        try { const t = await upstream.text(); message = String(t).slice(0, 400); } catch (_) {}
-      } else if (upstreamErr) message = String((upstreamErr && upstreamErr.message) || upstreamErr);
-
-      const fatal = [400, 401, 403, 404, 422].includes(status);
-      /* "real data" = content the app can keep and continue from — retry
-         comments are bytes but NOT data, so they must never reroute a
-         fatal error into the park path (that was the v5.0 bug: a 429
-         comment made totalBytes > 0, so a 401 got parked silently). */
-      const hasRealData = job.kind === "chat"
-        ? (parser.contentText.length > 0 || parser.sawToolCalls)
-        : totalBytes > 0;
-      if (fatal && !hasRealData) {
-        /* v5: the provider's error becomes REAL buffer bytes (an SSE error
-           event / error JSON), so live subscribers AND every reconnecting
-           tail replay it — the app then surfaces the actual provider error
-           ("Your API key is invalid", 401, …) instead of a cryptic
-           "(status 0)". failJob below just flips the row to failed. */
-        let clean = String(message).slice(0, 400);
-        try { const o = JSON.parse(message); if (o && o.error && o.error.message) clean = String(o.error.message).slice(0, 400); } catch (_) {}
-        if (job.kind === "images") {
-          try { await emitRaw(JSON.stringify({ error: { message: clean, code: status } }), true); } catch (_) {}
-        } else {
-          try { await emitRaw("data: " + JSON.stringify({ error: { message: clean, code: status } }) + "\n\n", true); } catch (_) {}
-        }
-        await failJob(env, jobId, token, "upstream " + status + ": " + clean, { live });
-        return;
-      }
-      if (fatal) { await parkJob(env, jobId, token); liveClose(live); return; }
-      /* retryable: 429 / 408 / 5xx / network — re-request until it gets in.
-         v5: OpenRouter 429s carry retry_after — honor it (capped) so the
-         re-request cadence is exactly as fast as the provider asks for. */
-      attempts++; inlineAttempts++;
-      try { await lockWrite(env, jobId, token, { attempts, updated_at: Date.now() }); } catch (_) {}
-      let waitMs = backoffFor(attempts);
-      let raSec = 0;
-      try { const o = JSON.parse(message); raSec = Number((o && o.error && o.error.metadata && o.error.metadata.retry_after_seconds) || 0) || 0; } catch (_) {}
-      if (!raSec && upstream && upstream.headers) {
-        const h = Number(upstream.headers.get("retry-after") || 0) || 0;
-        if (h > 0) raSec = h;
-      }
-      if (status === 429 && raSec > 0) waitMs = Math.min(Math.max(raSec * 1000, 500), 30000);
-      if (job.kind === "chat") {
-        const why = upstream ? ("upstream " + status) : "upstream unreachable";
-        try { await emitNote(why + " — re-requesting until it gets in (attempt " + (attempts + 1) + "/" + MAX_ATTEMPTS + ") in ~" + Math.max(1, Math.round(waitMs / 1000)) + "s", true); } catch (_) {}
-      }
-      if (inlineAttempts >= maxInline) { gaveUp = true; break; }
-      await sleep(waitMs);
+      const fetchInit = { method: method, headers: h, redirect: 'manual' };
+      if (body !== undefined) fetchInit.body = body;
+      if (needDuplex) fetchInit.duplex = 'half';
+      res = await fetch(upUrl.toString(), fetchInit);
+    } catch (err) {
+      return json({ error: 'upstream fetch failed', detail: String(err && err.message || err) }, req, 502);
     }
-  } finally {
-    clearInterval(heart);
-    try { await flush(); } catch (_) {}
-    if (gaveUp) {
-      /* release for the next driver (cron / piggyback / app reconnect).
-         v5: emit an HONEST error event as real buffer bytes — the watching
-         client and every reconnecting tail see exactly what happened
-         ("provider still busy after N attempts — retrying continues in
-         the background"), then close cleanly. A silent zero-byte close
-         here is what produced the app's "(status 0)" dead end. */
-      const clean = "the provider is still busy after " + attempts + " attempts — the worker keeps retrying in the background; reopen the chat later for the answer";
-      try {
-        if (job.kind === "images") await emitRaw(JSON.stringify({ error: { message: clean, code: 429 } }), true);
-        else await emitRaw("data: " + JSON.stringify({ error: { message: clean, code: 429 } }) + "\n\n", true);
-      } catch (_) {}
-      await releaseJob(env, jobId, token, attempts);
-      liveClose(live);
+
+    /* ---- redirect handling: rewrite Location and let the browser follow inside the worker ---- */
+    const loc = res.headers.get('location');
+    if (loc && res.status >= 300 && res.status < 400 && res.status !== 304) {
+      const mapped = mapLocation(loc, upUrl, event);
+      const rh = scrubHeaders(res.headers);
+      reissueCookies(res, rh, event);
+      rh.set('location', mapped);
+      maybeSetTokenCookie(req, rh, event);
+      return new Response(null, { status: res.status, headers: corsHeaders(req, rh) });
     }
+
+    /* ---- normal responses ---- */
+    const ct = (res.headers.get('content-type') || '').toLowerCase();
+    const outHeaders = scrubHeaders(res.headers);
+    reissueCookies(res, outHeaders, event);
+    maybeSetTokenCookie(req, outHeaders, event);
+    outHeaders.set('x-final-url', res.url || upUrl.toString());
+    const outCt = corsHeaders(req, outHeaders);
+
+    if (ct.includes('text/html')) {
+      const text = await res.text();
+      const html = rewriteHtml(text, pfx, host, new URL(req.url).origin, token, allowList(event));
+      return new Response(html, { status: res.status, headers: outCt });
+    }
+    if (ct.includes('text/css')) {
+      const text = await res.text();
+      const css = rewriteCss(text, pfx, host, allowList(event));
+      return new Response(css, { status: res.status, headers: outCt });
+    }
+
+    return new Response(res.body, { status: res.status, headers: outCt });
+  } catch (err) {
+    return json({ error: 'proxy error', detail: String(err && err.message || err) }, req, 500);
   }
 }
 
-async function releaseJob(env, id, token, attempts) {
-  const now = Date.now();
-  try {
-    await lockWrite(env, id, token, {
-      heartbeat: 0, next_retry: now + backoffFor(attempts), attempts, updated_at: now, lock_token: null,
-    });
-  } catch (_) {}
-}
-async function finalizeDone(env, id, token, live) {
-  const now = Date.now();
-  try {
-    await lockWrite(env, id, token, { status: "done", finish: 1, heartbeat: 0, updated_at: now, lock_token: null });
-    await runSQL(env, `DELETE FROM secrets WHERE job = ?`, [id]);
-  } catch (_) {}
-  liveClose(live);
-}
-async function parkJob(env, id, token) {
-  const now = Date.now();
-  try {
-    await lockWrite(env, id, token, { status: "parked", heartbeat: 0, updated_at: now, lock_token: null });
-    await runSQL(env, `DELETE FROM secrets WHERE job = ?`, [id]);
-  } catch (_) {}
-}
-async function failJob(env, id, token, reason, o = {}) {
-  const now = Date.now();
-  try {
-    await lockWrite(env, id, token, { status: "failed", heartbeat: 0, updated_at: now, lock_token: null });
-    await runSQL(env, `DELETE FROM secrets WHERE job = ?`, [id]);
-  } catch (_) {}
-  /* v5: the error payload itself is already in the job buffer (emitRaw'd
-     by the pump), so every subscriber and reconnecting tail replays it —
-     just close the live stream now. */
-  if (o.live) liveClose(o.live);
-}
+/* ============================================================ helpers */
 
-/* =====================================================================
-   ATTACH: the app's continue request meets a job we already hold
-   ===================================================================== */
-async function matchContinueJob(env, parsed) {
-  const msgs = parsed && parsed.messages;
-  if (!Array.isArray(msgs) || msgs.length < 3) return null;
-  const last = msgs[msgs.length - 1];
-  if (!last || last.role !== "user" || last.content !== CONTINUE_INSTRUCTION) return null;
-  const prev = msgs[msgs.length - 2];
-  if (!prev || prev.role !== "assistant" || typeof prev.content !== "string") return null;
-  const prefixKey = JSON.stringify(msgs.slice(0, -2));
-  const partial = prev.content;
-  const now = Date.now();
-  const rows = await allSQL(env,
-    `SELECT id, req, content_text FROM jobs WHERE kind = 'chat' AND status IN ('queued','streaming','done') AND updated_at > ? ORDER BY updated_at DESC LIMIT 12`,
-    [now - JOB_TTL_MS]);
-  let best = null, bestLen = -1;
-  const superseded = [];
-  for (const r of rows) {
-    let req = null;
-    try { req = JSON.parse(r.req); } catch (_) { continue; }
-    if (!req || !Array.isArray(req.messages)) continue;
-    if (JSON.stringify(req.messages) !== prefixKey) continue;
-    const ct = r.content_text || "";
-    if (!ct.startsWith(partial)) { superseded.push(r.id); continue; } // the app is ahead — retire it
-    if (ct.length > bestLen) { best = r; bestLen = ct.length; }
-  }
-  for (const id of superseded) {
-    try { await runSQL(env, `UPDATE jobs SET status = 'stopped', heartbeat = 0, updated_at = ? WHERE id = ? AND status IN ('queued','streaming')`, [now, id]); } catch (_) {}
-  }
-  if (!best) return null;
-  /* exact byte boundary for the app's partial (replay-parse the job) */
-  const all = await readAllChunkBytes(env, best.id);
-  const parser = makeParser();
-  parser.feed(all);
-  parser.flushPending();
-  const boundary = parser.boundaryFor(partial.length);
-  if (boundary < 0) return null;
-  return { id: best.id, boundary };
+function envOf(event) {
+  return (event && event.env) || globalThis.__ZAI_ENV || {};
 }
-
-/* =====================================================================
-   TAIL: replay a job from byte N, then follow live progress (D1 poll).
-   NEVER inject heartbeat bytes — the app's byte-offset math counts every
-   byte we send, so the body must be pure buffer bytes.
-   ===================================================================== */
-function tailStream(env, ctx, jobId, startOffset) {
-  const enc = new TextEncoder();
-  let closed = false;
-  /* v5: a connected tail is a WATCHER of the job — it registers in the live
-     registry so liveness models (and any same-isolate pump driving this
-     job) know a client is attached. Harmless in production (a counter). */
-  const live = liveFor(jobId);
-  live.__watchers = (live.__watchers || 0) + 1;
-  return new ReadableStream({
-    start(controller) {
-      const unwatch = () => { live.__watchers = Math.max(0, (live.__watchers || 1) - 1); };
-      const push = u8 => { if (!closed) { try { controller.enqueue(u8); } catch (_) { closed = true; } } };
-      const close = () => { if (!closed) { closed = true; unwatch(); try { controller.close(); } catch (_) {} } };
-      /* v5: an internal tail failure (D1 hiccup etc.) must ERROR the stream,
-         never close it — a clean close at incomplete data reads as "response
-         ended" and dead-ends the app at "(status 0)"; an error makes the
-         app reconnect, which is exactly what a transient D1 blip needs. */
-      const fail = () => { if (!closed) { closed = true; unwatch(); try { controller.error(new Error("nexus tail: transient failure — reconnect")); } catch (_) {} } };
-      (async () => {
-        let pos = 0;           // cumulative byte position of the chunk cursor
-        let sent = startOffset; // the next byte the client needs
-        let lastSeq = -1;
-        let lastKick = 0;
-        let idlePolls = 0;
-        let lastTotal = -1;
-        const deliver = u8 => {
-          /* contiguous delivery: a chunk may start BEFORE the client's
-             offset (its tail was already seen live before the flush
-             landed) — skip exactly that part, never duplicate */
-          const skip = Math.max(0, sent - pos);
-          if (skip < u8.length) push(u8.subarray(skip));
-          pos += u8.length;
-          sent = Math.max(sent, pos);
-        };
-        try {
-          /* ---- replay phase ---- */
-          const rows = await allSQL(env, `SELECT seq, bytes, data FROM chunks WHERE job = ? ORDER BY seq ASC`, [jobId]);
-          for (const r of rows) {
-            deliver(enc.encode(r.data));
-            lastSeq = Number(r.seq);
-          }
-          /* ---- live phase ---- */
-          while (!closed) {
-            const r = await getSQL(env, `SELECT status, bytes, heartbeat, created_at FROM jobs WHERE id = ?`, [jobId]);
-            if (!r) { close(); return; }
-            const status = r.status;
-            const total = Number(r.bytes);
-            if (total > pos || status === "done") {
-              const rows2 = await allSQL(env, `SELECT seq, data FROM chunks WHERE job = ? AND seq > ? ORDER BY seq ASC`, [jobId, lastSeq]);
-              for (const c of rows2) {
-                deliver(enc.encode(c.data));
-                lastSeq = Number(c.seq);
-              }
-            }
-            if ((status === "done" || status === "failed" || status === "parked" || status === "stopped") && pos >= total) { close(); return; }
-            if (Date.now() - Number(r.created_at) > JOB_TTL_MS) { close(); return; }
-            /* the job looks stalled — kick a work pass in THIS event (a
-               fresh execution context = progress resumes immediately) */
-            if (status === "queued" || status === "streaming") {
-              const stale = Date.now() - Number(r.heartbeat) > STALE_LOCK_MS;
-              if (stale && Date.now() - lastKick > Math.max(3000, TAIL_POLL_SLOW)) {
-                lastKick = Date.now();
-                try { ctx && ctx.waitUntil && ctx.waitUntil(driveJob(env, ctx, jobId).catch(() => {})); } catch (_) {}
-              }
-            }
-            idlePolls = lastTotal === total ? idlePolls + 1 : 0;
-            lastTotal = total;
-            await sleep(idlePolls > 4 ? TAIL_POLL_SLOW : TAIL_POLL_FAST);
-          }
-        } catch (_) { fail(); }
-      })();
-    },
-    cancel() { closed = true; live.__watchers = Math.max(0, (live.__watchers || 1) - 1); },
+function allowList(event) {
+  const extra = envOf(event).EXTRA_HOSTS || '';
+  const arr = ALLOW.slice();
+  String(extra).split(',').forEach((h) => {
+    h = h.trim().toLowerCase();
+    if (h && arr.indexOf(h) < 0) arr.push(h);
   });
+  return arr;
+}
+function hostAllowed(host, event) {
+  host = String(host || '').toLowerCase();
+  const list = allowList(event);
+  for (const a of list) {
+    if (host === a || host.endsWith('.' + a)) return true;
+  }
+  return false;
+}
+async function checkToken(req, url, token) {
+  if (req.headers.get('x-proxy-token') === token) return true;
+  if (url.searchParams.get('__t') === token) return true;
+  const ck = req.headers.get('cookie') || '';
+  const m = ck.match(/(?:^|;\s*)__zai_t=([^;]+)/);
+  if (m && decodeURIComponent(m[1]) === token) return true;
+  return false;
+}
+function maybeSetTokenCookie(req, h, event) {
+  const token = envOf(event).PROXY_TOKEN || '';
+  if (!token) return;
+  const ck = req.headers.get('cookie') || '';
+  if (ck.indexOf('__zai_t=') >= 0) return;
+  h.append('set-cookie', '__zai_t=' + encodeURIComponent(token) + '; Path=/; Max-Age=31536000; Secure; SameSite=None; Partitioned');
 }
 
-/* ---------- routes ---------- */
-function relayHeaders(contentType, jobId, extra) {
-  const h = { "Content-Type": contentType || "text/event-stream", "Cache-Control": "no-cache", "X-Accel-Buffering": "no" };
-  if (jobId) h["X-Nexus-Job"] = jobId;
-  for (const k in CORS) h[k] = CORS[k];
-  if (extra) for (const k in extra) h[k] = extra[k];
+function mergeCookies(a, b) {
+  const seen = new Map();
+  const add = (str) => {
+    if (!str) return;
+    str.split(';').forEach((kv) => {
+      kv = kv.trim();
+      if (!kv) return;
+      const name = kv.split('=')[0];
+      if (!seen.has(name)) seen.set(name, kv);
+    });
+  };
+  add(a); // browser-native cookies win
+  add(b); // patch-supplied fallback cookies fill gaps
+  return Array.from(seen.values()).join('; ');
+}
+
+/* response headers we must not forward */
+const SCRUB = new Set(['content-security-policy', 'content-security-policy-report-only', 'x-frame-options',
+  'strict-transport-security', 'cross-origin-opener-policy', 'cross-origin-embedder-policy',
+  'cross-origin-resource-policy', 'content-encoding', 'content-length', 'transfer-encoding',
+  'connection', 'keep-alive', 'upgrade', 'set-cookie', 'report-to', 'nel', 'vary']);
+
+function scrubHeaders(headers) {
+  const h = new Headers();
+  for (const [k, v] of headers) {
+    if (!SCRUB.has(k.toLowerCase())) h.set(k, v);
+  }
   return h;
 }
 
-async function handleProxy(request, pathname, ctx, env) {
-  const rawBody = new Uint8Array(await request.arrayBuffer());
-  let parsed = null;
-  try { parsed = JSON.parse(new TextDecoder().decode(rawBody)); } catch (_) {}
-  const fwd = {};
-  for (const h of FWD_HEADERS) { const v = request.headers.get(h); if (v) fwd[h] = v; }
-
-  /* no D1 (or an unparseable body) → plain passthrough (graceful degrade) */
-  if (!hasDB(env) || !parsed) {
-    const upstream = await fetch(upstreamBase(env) + (pathname === "/chat" ? "/chat/completions" : "/images"), {
-      method: "POST", headers: headersFrom(fwd), body: rawBody,
-      // @ts-ignore runtime-specific
-      cf: { cacheTtl: 0 },
-    });
-    const hdrs = new Headers(upstream.headers);
-    for (const k in CORS) hdrs.set(k, CORS[k]);
-    return new Response(upstream.body, { status: upstream.status, headers: hdrs });
-  }
-
-  /* ATTACH: a continue request that matches a job we're already holding */
-  if (pathname === "/chat") {
-    const m = await matchContinueJob(env, parsed);
-    if (m) {
-      const job = await getJobRow(env, m.id);
-      const live = liveFor(m.id);
-      const kick = () => { try { ctx && ctx.waitUntil && ctx.waitUntil(driveJob(env, ctx, m.id).catch(() => {})); } catch (_) {} };
-      if (job && (job.status === "streaming" || job.status === "queued")) kick();
-      /* X-Nexus-Job is hidden when the boundary is > 0 — the app's
-         absolute-offset reconnect math must stay correct */
-      const headers = relayHeaders((job && job.meta.contentType) || "text/event-stream", m.boundary > 0 ? null : m.id);
-      if (live.hasPump && live.abortCtl && !live.abortCtl.signal.aborted) {
-        return new Response(liveSubscriber(live, m.boundary), { status: 200, headers });
+/* re-issue upstream cookies for this worker's domain (CHIPS-partitioned so they work in the app iframe) */
+function reissueCookies(res, h, event) {
+  try {
+    let raw = [];
+    if (typeof res.headers.getSetCookie === 'function') raw = res.headers.getSetCookie();
+    else {
+      const single = res.headers.get('set-cookie');
+      if (single) raw = [single];
+    }
+    if (!raw.length) return;
+    raw.forEach((sc) => {
+      const parts = String(sc).split(';');
+      const nv = parts[0].trim();
+      if (!nv) return;
+      let expires = null, maxAge = null, httpOnly = false;
+      for (let i = 1; i < parts.length; i++) {
+        const p = parts[i].trim();
+        const k = p.split('=')[0].toLowerCase();
+        if (k === 'expires') expires = p.slice(8).trim();
+        else if (k === 'max-age') maxAge = p.slice(8).trim();
+        else if (k === 'httponly') httpOnly = true;
       }
-      return new Response(tailStream(env, ctx, m.id, m.boundary), { status: 200, headers });
-    }
-  }
-
-  /* attempt 0 — fatal 4xx passes straight through (v2 behavior: the app
-     maps auth/path errors itself); retryable failures become a durable
-     queued job the pump keeps re-requesting "until it gets in". */
-  let upstream = null, upstreamErr = null;
-  try {
-    upstream = await fetch(upstreamBase(env) + (pathname === "/chat" ? "/chat/completions" : "/images"), {
-      method: "POST", headers: headersFrom(fwd), body: rawBody,
-      // @ts-ignore runtime-specific
-      cf: { cacheTtl: 0 },
+      let out = nv + '; Path=/; Secure; SameSite=None; Partitioned';
+      if (expires) out += '; Expires=' + expires;
+      if (maxAge !== null && maxAge !== undefined && maxAge !== '') out += '; Max-Age=' + maxAge;
+      if (httpOnly) out += '; HttpOnly';
+      h.append('set-cookie', out);
     });
-  } catch (err) { upstreamErr = err; }
-  const retryable = !!(upstreamErr || (upstream && !upstream.ok && [408, 429, 500, 502, 503, 504, 522, 524].includes(upstream.status)));
-  if (!retryable && upstream && (!upstream.ok || !upstream.body)) {
-    const hdrs = new Headers(upstream.headers);
-    for (const k in CORS) hdrs.set(k, CORS[k]);
-    return new Response(upstream.body, { status: upstream.status, headers: hdrs });
-  }
-
-  /* create the durable job */
-  const id = crypto.randomUUID();
-  const kind = pathname === "/images" ? "images" : "chat";
-  const now = Date.now();
-  const contentType = (upstream && upstream.headers.get("content-type")) || (kind === "images" ? "application/json" : "text/event-stream");
-  const metaFwd = Object.assign({}, fwd);
-  delete metaFwd.authorization;
-  const meta = { fwd: metaFwd, contentType };
-  await runSQL(env,
-    `INSERT INTO jobs (id, kind, status, created_at, updated_at, heartbeat, next_retry, attempts, finish, bytes, content_text, req, meta, lock_token) VALUES (?, ?, 'queued', ?, ?, 0, 0, 0, 0, 0, '', ?, ?, NULL)`,
-    [id, kind, now, now, JSON.stringify(parsed), JSON.stringify(meta)]);
-  if (fwd.authorization) {
-    try { await runSQL(env, `INSERT INTO secrets (job, auth) VALUES (?, ?)`, [id, fwd.authorization]); } catch (_) {}
-  }
-  try { ctx && ctx.waitUntil && ctx.waitUntil(prune(env).catch(() => {})); } catch (_) {}
-
-  const live = liveFor(id);
-  const headers = relayHeaders(contentType, id);
-  /* v5: the request context is alive as long as the client is connected —
-     give the pump the FULL retry budget in-context ("re-request until it
-     gets in", up to MAX_ATTEMPTS / the 10-minute event budget). The
-     runtime's ~30s post-disconnect teardown is the real give-up signal
-     for clients that leave; the cron/piggyback then carry the job. */
-  try { ctx && ctx.waitUntil && ctx.waitUntil(driveJob(env, ctx, id, { firstUpstream: upstream || null, maxAttempts: MAX_ATTEMPTS }).catch(() => {})); } catch (_) {}
-  return new Response(liveSubscriber(live, 0), { status: 200, headers });
+    /* expose the raw cookies so the patch/shell can mirror them */
+    h.set('x-set-cookie', encodeURIComponent(JSON.stringify(raw)));
+  } catch (e) { /* ignore */ }
 }
 
-async function handleJobGet(url, ctx, env) {
-  if (!hasDB(env)) return json({ error: "job not found (relay in passthrough mode)" }, 404);
-  const id = url.pathname.split("/")[2];
-  const offset = Math.max(0, Number(url.searchParams.get("offset") || 0) || 0);
-  const job = await getJobRow(env, id);
-  if (!job) return json({ error: "job not found (expired or relay restarted)" }, 404);
-  /* v5: a FAILED job no longer 410s blindly — its buffer carries the real
-     provider error (persisted error event), so serve it: the app's reader
-     parses the error and surfaces the actual message + status instead of
-     a generic "job ended". 'stopped' = superseded (the app moved on). */
-  if (job.status === "stopped") return json({ error: "job ended (" + job.status + ")" }, 410);
-  /* v5: reconnects ALWAYS get the D1 tail. workerd forbids cross-request
-     I/O: a stream created in THIS request's context cannot be driven by a
-     pump running in the original POST's context (workerd 500s the response
-     with "Cannot perform I/O on behalf of a different request"). The tail
-     is fully self-contained: byte-exact replay from the chunk log, live
-     D1 polling (every pump flushes every ~2s), stale-pump kicks, and it
-     closes only on done/failed/parked. It also registers as a WATCHER on
-     the job's live registry so liveness models see the attached client. */
-  return new Response(tailStream(env, ctx, id, offset), { status: 200, headers: relayHeaders(job.meta.contentType, id, { "X-Nexus-Offset": String(job.bytes) }) });
+function corsHeaders(req, h) {
+  h.set('access-control-allow-origin', '*');
+  h.set('access-control-allow-methods', 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS');
+  const reqH = req.headers.get('access-control-request-headers');
+  h.set('access-control-allow-headers', reqH || '*');
+  h.set('access-control-expose-headers', 'content-disposition, content-type, x-set-cookie, x-final-url, filename');
+  h.set('access-control-max-age', '86400');
+  return h;
 }
 
-async function handleDelete(url, env) {
-  const id = url.pathname.split("/")[2];
-  const live = liveMap.get(id);
-  if (live) { liveAbort(live); liveMap.delete(id); }
-  if (hasDB(env)) { try { await deleteJobRows(env, id); } catch (_) {} }
-  return json({ ok: true });
+function json(obj, req, status) {
+  const h = new Headers({ 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+  return new Response(JSON.stringify(obj), { status: status || 200, headers: corsHeaders(req, h) });
 }
 
-/* ---------- maintenance ---------- */
-async function prune(env) {
-  if (!hasDB(env)) return;
-  const now = Date.now();
+/* map a Location header value into proxy space */
+function mapLocation(loc, upUrl, event) {
   try {
-    const dead = await allSQL(env,
-      `SELECT id FROM jobs WHERE (status IN ('done','failed','parked','stopped') AND updated_at < ?) OR (created_at < ?)`,
-      [now - DONE_TTL_MS, now - JOB_TTL_MS - DONE_TTL_MS]);
-    for (const r of dead) await deleteJobRows(env, r.id);
-    await runSQL(env,
-      `UPDATE jobs SET status = 'failed', heartbeat = 0, lock_token = NULL, updated_at = ? WHERE status IN ('queued','streaming') AND created_at < ?`,
-      [now, now - JOB_TTL_MS]);
-    await runSQL(env, `DELETE FROM secrets WHERE job NOT IN (SELECT id FROM jobs)`);
-    const n = await getSQL(env, `SELECT COUNT(*) AS n FROM jobs WHERE status IN ('queued','streaming')`);
-    if (n && Number(n.n) > MAX_ACTIVE_JOBS) {
-      const old = await allSQL(env, `SELECT id FROM jobs WHERE status IN ('done','stopped') ORDER BY updated_at ASC LIMIT ?`, [Number(n.n) - MAX_ACTIVE_JOBS]);
-      for (const r of old) await deleteJobRows(env, r.id);
+    const abs = new URL(loc, upUrl);
+    if (abs.protocol !== 'https:' && abs.protocol !== 'http:') return loc;
+    if (!hostAllowed(abs.host, event)) return loc; // external redirect — pass through untouched
+    if (abs.host === upUrl.host) {
+      const pfx = prefixForHost(upUrl.host, event);
+      return pfx + abs.pathname + abs.search;
     }
-  } catch (_) {}
+    return '/p/' + abs.host + abs.pathname + abs.search;
+  } catch (e) {
+    return loc;
+  }
+}
+function prefixForHost(host, event) {
+  if (host === chatHost(event)) return '/chat';
+  return '/p/' + host;
 }
 
-/* piggyback work: any incoming request can drive one due job in its own
-   fresh execution context — this is what makes progress resume the
-   instant the app reconnects, without waiting for the cron tick */
-async function maybeWorkAny(env, ctx) {
-  if (!hasDB(env)) return;
+/* ---------------- HTML rewriting ---------------- */
+function mapAttr(v, pfx, host, allow) {
   try {
-    const now = Date.now();
-    const r = await getSQL(env,
-      `SELECT id FROM jobs WHERE status IN ('queued','streaming') AND next_retry <= ? AND heartbeat < ? ORDER BY next_retry ASC LIMIT 1`,
-      [now, now - STALE_LOCK_MS]);
-    if (r && r.id) {
-      try { ctx && ctx.waitUntil && ctx.waitUntil(driveJob(env, ctx, r.id, { maxAttempts: 6, budgetMs: 90000 }).catch(() => {})); } catch (_) {}
+    const s = String(v || '').trim();
+    if (!s) return v;
+    if (/^(data|blob|about|javascript|mailto|tel|sms|intent|ms-|chrome|file|#)/i.test(s)) return v;
+    let m;
+    if ((m = s.match(/^https?:\/\/([^\/?#]+)/i))) {
+      const h = m[1].toLowerCase();
+      const ok = allow.some((a) => h === a || h.endsWith('.' + a));
+      if (!ok) return v;
+      const rest = s.slice(m[0].length) || '/';
+      return (h === host ? pfx : '/p/' + h) + rest;
     }
-  } catch (_) {}
+    if ((m = s.match(/^\/\/([^\/?#]+)/))) {
+      const h = m[1].toLowerCase();
+      const ok = allow.some((a) => h === a || h.endsWith('.' + a));
+      if (!ok) return v;
+      const rest = s.slice(m[0].length) || '/';
+      return (h === host ? pfx : '/p/' + h) + rest;
+    }
+    if (s.charAt(0) === '/' && s.charAt(1) !== '/') return pfx + s;
+    return v;
+  } catch (e) {
+    return v;
+  }
 }
 
-/* the real router — wrapped by the default export's catch-all */
-async function handleFetch(request, env, ctx) {
-  const url = new URL(request.url);
-  if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
-  if (hasDB(env)) { try { await ensureSchema(env); } catch (_) {} }
-  /* v5: ANY request piggybacks one due job into its own fresh context —
-     previously only /health did, so a stuck job only revived on a health
-     poll. Fire-and-forget (waitUntil'd) — zero added latency. */
-  const piggyback = () => { try { ctx && ctx.waitUntil && ctx.waitUntil(maybeWorkAny(env, ctx).catch(() => {})); } catch (_) {} };
+const ATTR_NAMES = 'href|src|action|formaction|poster|data-src|data-href|data-url|data-background';
 
-  if (url.pathname === "/health") {
-    let out;
-    if (hasDB(env)) {
-      let cronAge = -1, active = 0;
-      try { cronAge = Date.now() - (await wstateGet(env, "cron_beat") || 0); } catch (_) {}
-      try { const n = await getSQL(env, `SELECT COUNT(*) AS n FROM jobs WHERE status IN ('queued','streaming')`); active = n ? Number(n.n) : 0; } catch (_) {}
-      out = { ok: true, relay: "nexus", v: WORKER_VERSION, d1: true, mode: "job engine", cronOk: cronAge >= 0 && cronAge < 3 * 60 * 1000, cronAgeMs: cronAge, active, time: Date.now() };
-      if (!out.cronOk) out.setup = "add a Cron Trigger with schedule * * * * * (Settings → Triggers & Events) so jobs finish while your phone is off";
+function rewriteHtml(text, pfx, host, workerOrigin, token, allow) {
+  try {
+    /* strip CSP meta tags and base targets */
+    text = text.replace(/<meta[^>]+http-equiv\s*=\s*["']?content-security-policy["']?[^>]*>/gi, '');
+    text = text.replace(/<base\b([^>]*?)\s+target\s*=\s*["'][^"']*["']/gi, '<base$1');
+
+    /* rewrite URL attributes */
+    const attrRe = new RegExp('(\\s(?:' + ATTR_NAMES + ')\\s*=\\s*)("([^"]*)"|\'([^\']*)\')', 'gi');
+    text = text.replace(attrRe, (whole, pre, quoted, dq, sq) => {
+      const v = dq !== undefined ? dq : sq;
+      const nv = mapAttr(v, pfx, host, allow);
+      if (nv === v) return whole;
+      return pre + '"' + String(nv).replace(/"/g, '%22') + '"';
+    });
+
+    /* srcset lists */
+    const ssRe = /(\ssrcset\s*=\s*)("([^"]*)"|'([^']*)')/gi;
+    text = text.replace(ssRe, (whole, pre, quoted, dq, sq) => {
+      const v = dq !== undefined ? dq : sq;
+      const nv = v.split(',').map((cand) => {
+        const t = cand.trim();
+        if (!t) return '';
+        const sp = t.indexOf(' ');
+        const u = sp < 0 ? t : t.slice(0, sp);
+        const rest = sp < 0 ? '' : t.slice(sp);
+        const nu = mapAttr(u, pfx, host, allow);
+        return nu === u ? t : nu + rest;
+      }).filter(Boolean).join(', ');
+      if (nv === v) return whole;
+      return pre + '"' + nv + '"';
+    });
+
+    /* url() inside style="..." attributes only (inline JS safety) */
+    const styleRe = /(\sstyle\s*=\s*)("([^"]*)"|'([^']*)')/gi;
+    text = text.replace(styleRe, (whole, pre, quoted, dq, sq) => {
+      const v = dq !== undefined ? dq : sq;
+      const nv = v.replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/gi, (w, q, u) => {
+        const nu = mapAttr(u, pfx, host, allow);
+        return nu === u ? w : "url('" + nu + "')";
+      });
+      if (nv === v) return whole;
+      return pre + '"' + nv.replace(/"/g, '&quot;') + '"';
+    });
+
+    /* inject config + runtime patch as the first script */
+    const cfg = { pfx: pfx, host: host, worker: workerOrigin, token: token || '', allow: allow };
+    const inject = '<scr' + 'ipt>window.__ZAI__=' + JSON.stringify(cfg) + ';' + PATCH_JS + '</scr' + 'ipt>';
+    if (/<head[^>]*>/i.test(text)) text = text.replace(/<head[^>]*>/i, (m) => m + inject);
+    else if (/<html[^>]*>/i.test(text)) text = text.replace(/<html[^>]*>/i, (m) => m + inject);
+    else text = inject + text;
+    return text;
+  } catch (e) {
+    return text;
+  }
+}
+
+function rewriteCss(text, pfx, host, allow) {
+  try {
+    text = text.replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/gi, (w, q, u) => {
+      const nu = mapAttr(u, pfx, host, allow);
+      return nu === u ? w : 'url("' + nu + '")';
+    });
+    text = text.replace(/@import\s+(['"])([^'"]+)\1/gi, (w, q, u) => {
+      const nu = mapAttr(u, pfx, host, allow);
+      return nu === u ? w : '@import "' + nu + '"';
+    });
+    return text;
+  } catch (e) {
+    return text;
+  }
+}
+
+/* ---------------- websocket proxy ---------------- */
+async function proxyWebsocket(req, url, event) {
+  try {
+    /* resolve upstream ws url */
+    let target;
+    if (url.pathname === '/chat' || url.pathname.startsWith('/chat/')) {
+      target = chatUpstream(event).replace(/^http/, 'ws') + url.pathname.slice('/chat'.length) + url.search;
+    } else if (url.pathname.startsWith('/p/')) {
+      const rest = url.pathname.slice(3);
+      const slash = rest.indexOf('/');
+      const host = slash < 0 ? rest : rest.slice(0, slash);
+      const path = slash < 0 ? '/' : rest.slice(slash);
+      if (!hostAllowed(host, event)) return json({ error: 'host not allowed' }, req, 403);
+      target = 'wss://' + host + path + url.search;
     } else {
-      out = { ok: true, relay: "nexus", v: WORKER_VERSION, d1: false, mode: "passthrough (bind D1 as DB for the background job engine)", time: Date.now(), setup: "create a D1 database and bind it with variable name DB (Settings → Bindings)" };
+      return json({ error: 'unknown route' }, req, 404);
     }
-    maybeWorkAny(env, ctx);
-    return json(out);
-  }
+    const t = new URL(target);
+    if (t.searchParams.has('__t')) t.searchParams.delete('__t');
 
-  if (request.method === "POST" && (url.pathname === "/chat" || url.pathname === "/images")) {
-    piggyback();
-    try {
-      return await handleProxy(request, url.pathname, ctx, env);
-    } catch (err) {
-      return json({ error: { message: "relay upstream failed: " + (err && err.message || String(err)), code: 502 } }, 502);
-    }
+    const upHeaders = new Headers({ 'Upgrade': 'websocket' });
+    const ck = mergeCookies(req.headers.get('cookie') || '', req.headers.get('x-cookie') || '');
+    if (ck) upHeaders.set('cookie', ck);
+    upHeaders.set('origin', 'https://' + t.host);
+
+    const upRes = await fetch(t.toString(), { headers: upHeaders });
+    const upWs = upRes.webSocket;
+    if (!upWs) return json({ error: 'upstream refused websocket' }, req, 502);
+    upWs.accept();
+
+    const pair = new WebSocketPair();
+    const client = pair[0];
+    const server = pair[1];
+    client.accept();
+
+    upWs.addEventListener('message', (e) => { try { client.send(e.data); } catch (err) { /* ignore */ } });
+    client.addEventListener('message', (e) => { try { upWs.send(e.data); } catch (err) { /* ignore */ } });
+    upWs.addEventListener('close', (e) => { try { client.close(e.code || 1000, e.reason || ''); } catch (err) { /* ignore */ } });
+    client.addEventListener('close', (e) => { try { upWs.close(e.code || 1000, e.reason || ''); } catch (err) { /* ignore */ } });
+    upWs.addEventListener('error', () => { try { client.close(); } catch (err) { /* ignore */ } });
+
+    return new Response(null, { status: 101, webSocket: client });
+  } catch (err) {
+    return json({ error: 'websocket proxy failed', detail: String(err && err.message || err) }, req, 500);
   }
-  if (request.method === "GET" && /^\/job\/[A-Za-z0-9-]+$/.test(url.pathname)) {
-    piggyback();
-    return handleJobGet(url, ctx, env);
-  }
-  if (request.method === "DELETE" && /^\/job\/[A-Za-z0-9-]+$/.test(url.pathname)) {
-    piggyback();
-    return handleDelete(url, env);
-  }
-  return json({ error: "not found", hint: "use /chat, /images, /job/:id?offset=N, /health" }, 404);
 }
 
-export default {
-  async fetch(request, env, ctx) {
-    try {
-      return await handleFetch(request, env, ctx);
-    } catch (err) {
-      /* v5: nothing 500s opaquely — a CORS'd JSON error the app can read,
-         instead of a bare runtime 500 the browser blocks as a network
-         failure ("status 0"). */
-      return json({ error: { message: "relay internal error: " + (err && err.message || String(err)), code: 500 } }, 500);
-    }
-  },
+/* ---------------- landing page ---------------- */
+const FAVICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#171A23"/><path d="M18 20h28v7H33.5L46 44h-8.5L27 30.5V44h-9z" fill="#7C6CF0"/></svg>';
 
-  /* cron tick: heartbeat + prune + up to two jobs of real work */
-  async scheduled(_event, env, ctx) {
-    if (!hasDB(env)) return;
-    try { await ensureSchema(env); } catch (_) { return; }
-    try { await wstateSet(env, "cron_beat", Date.now()); } catch (_) {}
-    try { await prune(env); } catch (_) {}
-    const deadline = Date.now() + TICK_BUDGET_MS;
-    for (let i = 0; i < 2; i++) {
-      if (Date.now() > deadline - 15000) break;
-      try {
-        const now = Date.now();
-        const r = await getSQL(env,
-          `SELECT id FROM jobs WHERE status IN ('queued','streaming') AND next_retry <= ? AND heartbeat < ? ORDER BY next_retry ASC LIMIT 1`,
-          [now, now - STALE_LOCK_MS]);
-        if (!r || !r.id) break;
-        await driveJob(env, ctx, r.id, { maxAttempts: 8, cron: true, budgetMs: Math.max(30000, deadline - Date.now() - 10000) });
-      } catch (_) {}
-    }
-    try { await wstateSet(env, "last_work", Date.now()); } catch (_) {}
-  },
-};
+function landing(event) {
+  const tokenRequired = !!(envOf(event).PROXY_TOKEN);
+  const html = '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
+    '<title>z.ai pocket proxy</title><link rel="icon" href="data:image/svg+xml,' + encodeURIComponent(FAVICON_SVG) + '">' +
+    '<style>body{background:#0B0D12;color:#E7E9EE;font-family:system-ui,-apple-system,sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}' +
+    '.c{max-width:420px;padding:40px 28px;text-align:center}h1{font-size:22px;margin:0 0 6px}p{color:#9aa1ad;font-size:14px;line-height:1.6;margin:8px 0}' +
+    'a{display:inline-block;margin-top:18px;background:#6E6AF8;color:#fff;text-decoration:none;padding:13px 26px;border-radius:12px;font-weight:600}' +
+    '.ok{color:#4ade80;font-size:13px;margin-top:14px}</style></head><body><div class="c">' +
+    '<h1>z.ai pocket proxy</h1><p>' + VERSION + '</p>' +
+    '<p>Online. Point the zai-pocket.html app at this URL, or jump straight in:</p>' +
+    '<a href="/chat/">Open chat.z.ai</a>' +
+    '<p class="ok">&#10003; worker reachable' + (tokenRequired ? ' &middot; token required' : ' &middot; no token set (add PROXY_TOKEN for safety)') + '</p>' +
+    '</div></body></html>';
+  return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } });
+}
