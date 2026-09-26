@@ -1,0 +1,3740 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0B0D12">
+<title>Z.ai Pocket — Code Copier</title>
+<style>
+:root{
+  --bg:#0B0D12; --panel:#14161F; --panel2:#1A1D28; --line:rgba(255,255,255,.08);
+  --txt:#E7E9EE; --sub:#9AA1AD; --acc:#6E6AF8; --ok:#4ADE80; --bad:#F87171;
+  --sat:env(safe-area-inset-top,0px); --sab:env(safe-area-inset-bottom,0px);
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{margin:0;background:radial-gradient(1100px 500px at 50% -12%,rgba(110,106,248,.14),transparent 60%),var(--bg);
+color:var(--txt);font-family:-apple-system,BlinkMacSystemFont,system-ui,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;
+font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased;
+padding:calc(var(--sat) + 18px) 16px calc(var(--sab) + 46px)}
+button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
+.wrap{max-width:680px;margin:0 auto}
+.logoRow{display:flex;align-items:center;gap:12px;margin-bottom:18px}
+.logo{width:46px;height:46px;border-radius:13px;background:linear-gradient(135deg,#6E6AF8,#4E4AC8);
+display:flex;align-items:center;justify-content:center;flex:none;box-shadow:0 8px 24px rgba(110,106,248,.35)}
+.logo svg{width:26px;height:26px}
+h1{margin:0;font-size:21px;letter-spacing:.2px}
+.tag{color:var(--sub);font-size:13px;margin-top:2px;line-height:1.45}
+h2.sec{margin:26px 2px 12px;font-size:17px;letter-spacing:.2px}
+h2.sec .n{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:8px;
+margin-right:9px;background:rgba(110,106,248,.16);border:1px solid rgba(110,106,248,.4);color:#B9B6FB;
+font-size:14px;vertical-align:-4px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:15px 16px;margin-bottom:14px}
+.card b{font-size:14px}
+.card ol{padding-left:20px;margin:10px 0 0}
+.card li{margin:8px 0;font-size:13.5px;color:#C4C9D4}
+.card li b{color:var(--txt)}
+.note{margin-top:12px;padding:10px 12px;border-radius:10px;background:rgba(110,106,248,.08);
+border:1px solid rgba(110,106,248,.25);color:#B9B6FB;font-size:12.5px;line-height:1.55}
+.meta{display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center;color:var(--sub);font-size:12.5px;
+margin:0 2px 12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.meta .chk{color:var(--ok);font-weight:700}
+.btn{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;padding:15px;border-radius:13px;
+font-weight:650;font-size:15px;background:var(--acc);color:#fff;
+transition:transform .05s,filter .15s;margin-bottom:8px}
+.btn:active{transform:scale(.985)}
+.btn.ghost{background:var(--panel2);border:1px solid var(--line);color:var(--txt)}
+.row{display:flex;gap:8px}
+.row .btn{margin-bottom:0}
+details{margin-top:12px}
+summary{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;padding:12px;border-radius:13px;
+background:var(--panel2);border:1px solid var(--line);color:var(--sub);font-size:13.5px;font-weight:600;
+list-style:none;-webkit-appearance:none;appearance:none}
+summary::-webkit-details-marker{display:none}
+details[open] summary{margin-bottom:10px;color:var(--txt)}
+textarea{width:100%;min-height:300px;max-height:56vh;background:var(--panel2);
+border:1px solid var(--line);border-radius:13px;padding:12px;color:#C7CDDA;
+font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;line-height:1.5;
+resize:vertical;outline:none;-webkit-user-select:text;user-select:text}
+textarea:focus{border-color:var(--acc)}
+.foot{color:var(--sub);font-size:12px;margin:16px 2px 0;line-height:1.6}
+#toast{position:fixed;left:14px;right:14px;bottom:calc(var(--sab) + 18px);z-index:60;background:#20232F;
+border:1px solid var(--line);border-radius:14px;padding:13px 15px;font-size:13.5px;
+box-shadow:0 12px 32px rgba(0,0,0,.5);opacity:0;transform:translateY(14px);transition:all .22s;
+pointer-events:none;max-width:652px;margin:0 auto}
+#toast.on{opacity:1;transform:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="logoRow">
+    <div class="logo"><svg viewBox="0 0 64 64"><path d="M18 20h28v7H33.5L46 44h-8.5L27 30.5V44h-9z" fill="#fff"></path></svg></div>
+    <div><h1>Code Copier</h1>
+    <div class="tag">The whole build lives inside this one page: the app file for your phone and the worker for Cloudflare — plus this page itself, copyable in one tap. Works fully offline.</div></div>
+  </div>
+
+  <div class="card">
+    <b>What this page is</b>
+    <ol>
+      <li><b>File 1 — zai-pocket.html</b>: the app file. Save it on your phone; it runs Z.ai <b>inside the file itself</b>, in a locked frame fed quietly by your worker — health-checked, auto-open, back/reload/home built in, and a <b>switchable relay</b>: if the worker's address ever stops answering on your network, deploy the same worker code under a new name and paste the new address into the file — no rebuild needed.</li>
+      <li><b>File 2 — zai-proxy-worker.js</b>: the Cloudflare Worker relay. Every byte of the app flows through it as an <b>unreadable token</b>, fetched — never opened as a web page. This is the code you paste into Cloudflare.</li>
+      <li>Both files are carried <b>byte-exact</b> inside this page and checksum-verified below — and section 3 copies <b>this entire page</b> (both files included) in a single tap, so you never need chat again to rebuild anything.</li>
+    </ol>
+  </div>
+
+  <h2 class="sec"><span class="n">1</span>zai-pocket.html — the app file (client side)</h2>
+
+  <div class="card">
+    <b>How to use it</b>
+    <ol>
+      <li>Tap <b>Copy</b> below, open any notes app, paste, and save it as <b>zai-pocket.html</b> — or just tap <b>Save the file</b>.</li>
+      <li>Open it from <b>Downloads / Files</b> on your phone.</li>
+      <li>Tap <b>Open Z.ai in this file</b> — the app streams into a locked frame inside the file. Your phone never opens a blocked page: filters intercept page <i>visits</i>, and this file never makes one. Every byte arrives as an opaque token through your worker.</li>
+    </ol>
+    <div class="note">v6.1: the baked relay address is only the <b>first candidate</b>. The file probes a relay registry (the baked address plus any you add, remembered on your phone) and auto-fails-over between them. If every relay dies, the error card shows a per-address diagnosis and a paste box to switch relays inline. The phone's browser never opens any relay as a website — it only fetches opaque tokens through it, which page-visit filters do not intercept.</div>
+  </div>
+
+  <div class="meta" id="metaPocket">checking the embedded file…</div>
+
+  <button class="btn" id="pCopy">Copy zai-pocket.html</button>
+  <div class="row">
+    <button class="btn ghost" id="pSave">Save the file</button>
+    <button class="btn ghost" id="pSel">Select all</button>
+  </div>
+  <details id="detPocket"><summary>Show the code</summary>
+    <textarea id="codePocket" readonly="" spellcheck="false" autocapitalize="off" autocorrect="off" wrap="soft" aria-label="zai-pocket.html contents">&lt;!doctype html&gt;
+&lt;html lang="en"&gt;
+&lt;head&gt;
+&lt;meta charset="utf-8"&gt;
+&lt;meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"&gt;
+&lt;meta name="theme-color" content="#0B0D12"&gt;
+&lt;title&gt;Z.ai Pocket&lt;/title&gt;
+&lt;style&gt;
+:root{
+  --bg:#0B0D12; --panel:#14161F; --panel2:#1A1D28; --line:rgba(255,255,255,.08);
+  --txt:#E7E9EE; --sub:#9AA1AD; --acc:#6E6AF8; --ok:#4ADE80; --bad:#F87171; --warn:#FBBF24;
+  --sat:env(safe-area-inset-top,0px); --sab:env(safe-area-inset-bottom,0px);
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{margin:0;background:radial-gradient(1100px 500px at 50% -12%,rgba(110,106,248,.14),transparent 60%),var(--bg);
+color:var(--txt);font-family:-apple-system,BlinkMacSystemFont,system-ui,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;
+font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased;
+padding:calc(var(--sat) + 18px) 16px calc(var(--sab) + 46px)}
+button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
+.wrap{max-width:680px;margin:0 auto}
+.logoRow{display:flex;align-items:center;gap:12px;margin-bottom:18px}
+.logo{width:46px;height:46px;border-radius:13px;background:linear-gradient(135deg,#6E6AF8,#4E4AC8);
+display:flex;align-items:center;justify-content:center;flex:none;box-shadow:0 8px 24px rgba(110,106,248,.35)}
+.logo svg{width:26px;height:26px}
+h1{margin:0;font-size:21px;letter-spacing:.2px}
+.tag{color:var(--sub);font-size:13px;margin-top:2px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:15px 16px;margin-bottom:16px}
+.card b{font-size:14px}
+.card ol{padding-left:20px;margin:10px 0 0}
+.card li{margin:8px 0;font-size:13.5px;color:#C4C9D4}
+.card li b{color:var(--txt)}
+.hero{padding:20px 16px;text-align:center}
+.pill{display:inline-flex;align-items:center;gap:7px;padding:5px 13px;border-radius:999px;
+background:var(--panel2);border:1px solid var(--line);font-size:12.5px;color:var(--sub);margin-bottom:16px}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--warn);flex:none;transition:background .3s}
+.dot.on{background:var(--ok);box-shadow:0 0 10px rgba(74,222,128,.7)}
+.dot.off{background:var(--bad)}
+.pill .v{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px}
+.btn{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;padding:15px;border-radius:13px;
+font-weight:650;font-size:15px;background:var(--acc);color:#fff;
+transition:transform .05s,filter .15s;margin-bottom:8px}
+.btn:active{transform:scale(.985)}
+.btn[disabled]{filter:grayscale(.5) brightness(.7)}
+.btn.ghost{background:var(--panel2);border:1px solid var(--line);color:var(--txt)}
+.row{display:flex;gap:8px}
+.row .btn{margin-bottom:0}
+.btn svg{width:18px;height:18px;flex:none}
+.hint{color:var(--sub);font-size:12.5px;margin-top:10px}
+.url{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;color:#B9B6FB;
+background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:11px 12px;
+margin:10px 0 12px;word-break:break-all;user-select:all;-webkit-user-select:all}
+.switchRow{display:flex;align-items:center;gap:12px;padding:2px 0}
+.switchRow .txt{flex:1;font-size:14px}
+.switchRow .txt small{display:block;color:var(--sub);font-size:12px;margin-top:2px}
+.sw{position:relative;width:52px;height:31px;flex:none}
+.sw input{position:absolute;inset:0;opacity:0;margin:0;cursor:pointer}
+.sw i{position:absolute;inset:0;border-radius:999px;background:var(--panel2);border:1px solid var(--line);transition:background .2s}
+.sw i:after{content:"";position:absolute;top:3px;left:3px;width:23px;height:23px;border-radius:50%;
+background:#fff;box-shadow:0 2px 6px rgba(0,0,0,.4);transition:transform .2s}
+.sw input:checked + i{background:var(--acc);border-color:transparent}
+.sw input:checked + i:after{transform:translateX(21px)}
+.cd{display:none;align-items:center;justify-content:space-between;gap:10px;margin-top:12px;padding:11px 13px;
+border-radius:12px;background:rgba(110,106,248,.1);border:1px solid rgba(110,106,248,.3)}
+.cd.on{display:flex}
+.cd .t{font-size:13.5px;color:#B9B6FB}
+.cd .t b{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.cd button{padding:7px 14px;border-radius:9px;background:var(--panel2);border:1px solid var(--line);
+font-size:13px;font-weight:600;color:var(--txt)}
+.chk{font-size:12.5px;color:var(--sub);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+margin-top:10px;min-height:18px;word-break:break-all}
+.chk.ok{color:var(--ok)}
+.chk.bad{color:var(--bad)}
+.foot{color:var(--sub);font-size:12px;margin:10px 2px 0;line-height:1.6;text-align:center}
+.errBox{padding:12px 14px;border-radius:12px;background:rgba(248,113,113,.08);
+border:1px solid rgba(248,113,113,.35);color:#FDA4AF;font-size:13.5px;line-height:1.6}
+.errBox b{color:#fff}
+/* ---- relay switcher (v6.1) ---- */
+.relayPanel{display:none;margin-top:12px}
+.relayPanel.on{display:block}
+.relayPanel .rl{font-size:12.5px;color:var(--sub);line-height:1.55;margin-bottom:10px;text-align:left}
+.relayPanel input{width:100%;padding:12px 13px;border-radius:11px;background:var(--panel2);
+border:1px solid var(--line);color:var(--txt);font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;
+box-sizing:border-box;margin-bottom:8px}
+.relayPanel input:focus{outline:1px solid var(--acc)}
+.dlist{margin-top:10px;text-align:left}
+.drow{display:flex;justify-content:space-between;gap:10px;padding:7px 10px;border-radius:9px;
+background:rgba(248,113,113,.07);border:1px solid rgba(248,113,113,.25);margin-top:6px;flex-wrap:wrap}
+.drow.ok{background:rgba(74,222,128,.07);border-color:rgba(74,222,128,.3)}
+.du{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;word-break:break-all;color:#FDA4AF}
+.drow.ok .du{color:#86EFAC}
+.dv{font-size:11.5px;color:var(--sub)}
+#toast{position:fixed;left:14px;right:14px;bottom:calc(var(--sab) + 18px);z-index:60;background:#20232F;
+border:1px solid var(--line);border-radius:14px;padding:13px 15px;font-size:13.5px;
+box-shadow:0 12px 32px rgba(0,0,0,.5);opacity:0;transform:translateY(14px);transition:all .22s;
+pointer-events:none;max-width:652px;margin:0 auto}
+#toast.on{opacity:1;transform:none}
+/* ---- sandboxed app view (v5: srcdoc, null-origin, fetch-fed) ---- */
+#appView{position:fixed;inset:0;z-index:50;background:var(--bg);display:none;flex-direction:column}
+#appView.on{display:flex}
+.avBar{display:flex;align-items:center;gap:7px;padding:calc(var(--sat) + 8px) 10px 8px;
+background:var(--panel);border-bottom:1px solid var(--line);flex:none}
+.avBar .dot{margin:0 2px;flex:none}
+.avTitle{flex:1;min-width:0;margin:0 2px}
+.avTitle b{display:block;font-size:13.5px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.avTitle span{display:block;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;color:var(--sub);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.avBtn{width:38px;height:38px;border-radius:10px;background:var(--panel2);border:1px solid var(--line);
+display:flex;align-items:center;justify-content:center;flex:none;color:var(--txt)}
+.avBtn:active{transform:scale(.94)}
+.avBtn[disabled]{opacity:.3}
+.avBtn svg{width:17px;height:17px}
+.avBtn.close{background:rgba(248,113,113,.12);border-color:rgba(248,113,113,.4);color:#FDA4AF}
+#avStage{position:relative;flex:1;min-height:0}
+#avFrame{position:absolute;inset:0;width:100%;height:100%;border:none;background:#0B0D12}
+#avLoad{position:absolute;left:0;right:0;top:0;height:3px;background:rgba(110,106,248,.25);overflow:hidden;display:none}
+#avLoad.on{display:block}
+#avLoad i{position:absolute;top:0;bottom:0;width:38%;background:var(--acc);border-radius:3px;
+animation:avslide 1.1s ease-in-out infinite}
+@keyframes avslide{0%{left:-40%}100%{left:105%}}
+#avErr{position:absolute;inset:0;display:none;align-items:center;justify-content:center;padding:28px;background:var(--bg);flex-direction:column;overflow-y:auto}
+#avErr.on{display:flex}
+#avErr .errBox{max-width:420px;text-align:center}
+.errWrap{width:100%;max-width:430px}
+body.locked{overflow:hidden}
+.avNote{padding:8px 14px calc(var(--sab) + 10px);text-align:center;color:var(--sub);font-size:11px;flex:none;background:var(--panel);border-top:1px solid var(--line)}
+&lt;/style&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;div class="wrap"&gt;
+
+  &lt;div class="logoRow"&gt;
+    &lt;div class="logo"&gt;&lt;svg viewBox="0 0 64 64"&gt;&lt;path d="M18 20h28v7H33.5L46 44h-8.5L27 30.5V44h-9z" fill="#fff"/&gt;&lt;/svg&gt;&lt;/div&gt;
+    &lt;div&gt;&lt;h1&gt;Z.ai Pocket&lt;/h1&gt;
+    &lt;div class="tag"&gt;The z.ai app, saved as one file on your phone. It runs through your worker.&lt;/div&gt;&lt;/div&gt;
+  &lt;/div&gt;
+
+  &lt;div class="card hero"&gt;
+    &lt;div class="pill"&gt;&lt;span class="dot" id="dot"&gt;&lt;/span&gt;&lt;span id="stTxt"&gt;checking your worker&amp;hellip;&lt;/span&gt;&lt;span class="v" id="stVer"&gt;&lt;/span&gt;&lt;/div&gt;
+    &lt;button class="btn" id="btnOpen"&gt;&lt;svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"&gt;&lt;path d="M5 12h14"/&gt;&lt;path d="m13 6 6 6-6 6"/&gt;&lt;/svg&gt;Open Z.ai in this file&lt;/button&gt;
+    &lt;div class="hint"&gt;The full app &amp;mdash; chat, files, everything &amp;mdash; streams into a locked frame &lt;b&gt;inside this file&lt;/b&gt;. Your phone never opens a blocked page: this file pulls every byte quietly through your worker, and organization filters only intercept page visits, which this never makes.&lt;/div&gt;
+  &lt;/div&gt;
+
+  &lt;div class="card"&gt;
+    &lt;div class="switchRow"&gt;
+      &lt;div class="txt"&gt;Open Z.ai automatically&lt;small&gt;Whenever this file is opened, the app launches after a short countdown.&lt;/small&gt;&lt;/div&gt;
+      &lt;label class="sw"&gt;&lt;input type="checkbox" id="auto"&gt;&lt;i&gt;&lt;/i&gt;&lt;/label&gt;
+    &lt;/div&gt;
+    &lt;div class="cd" id="cdRow"&gt;
+      &lt;div class="t"&gt;Opening Z.ai in &lt;b id="cd"&gt;5&lt;/b&gt;&amp;hellip;&lt;/div&gt;
+      &lt;button id="cdCancel"&gt;Cancel&lt;/button&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+
+  &lt;div class="card"&gt;
+    &lt;b&gt;Your relay&lt;/b&gt;
+    &lt;div class="url" id="urlTxt"&gt;&amp;mdash;&lt;/div&gt;
+    &lt;div class="row"&gt;
+      &lt;button class="btn ghost" id="btnCheck"&gt;Check relay&lt;/button&gt;
+      &lt;button class="btn ghost" id="btnCopyUrl"&gt;Copy link&lt;/button&gt;
+    &lt;/div&gt;
+    &lt;button class="btn ghost" id="btnRelay" style="margin-top:8px"&gt;Change relay address&lt;/button&gt;
+    &lt;div class="chk" id="chk"&gt;&lt;/div&gt;
+    &lt;div class="relayPanel" id="relayPanel"&gt;
+      &lt;div class="rl"&gt;Use this if the address above stops answering on your network. Deploying the &lt;b&gt;same worker code&lt;/b&gt; in Cloudflare under a &lt;b&gt;new name&lt;/b&gt; gives it a brand-new address &amp;mdash; paste that new address here and this file switches to it instantly, with zero other changes.&lt;/div&gt;
+      &lt;input id="relayInput" type="url" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://new-name.your-account.workers.dev"&gt;
+      &lt;button class="btn" id="relayApply"&gt;Use this relay&lt;/button&gt;
+      &lt;div class="chk" id="relayDiag"&gt;&lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+
+  &lt;div class="card"&gt;
+    &lt;b&gt;If it ever stops working&lt;/b&gt;
+    &lt;ol&gt;
+      &lt;li&gt;If the app view shows an error card, tap &lt;b&gt;Retry&lt;/b&gt; &amp;mdash; often just a weak network moment.&lt;/li&gt;
+      &lt;li&gt;Make sure you're online, then tap &lt;b&gt;Check relay&lt;/b&gt; above.&lt;/li&gt;
+      &lt;li&gt;If the relay stays unreachable while you are online, this network is probably &lt;b&gt;blocking its address&lt;/b&gt;. Deploy the same worker code in Cloudflare under a &lt;b&gt;new name&lt;/b&gt; (a new address), tap &lt;b&gt;Change relay address&lt;/b&gt; above, and paste it &amp;mdash; this file itself never needs rebuilding.&lt;/li&gt;
+      &lt;li&gt;This file never expires and never needs the network just to open.&lt;/li&gt;
+    &lt;/ol&gt;
+  &lt;/div&gt;
+
+  &lt;div class="foot"&gt;zai-pocket.html &amp;middot; sandboxed v6.1 &amp;middot; switchable relay &amp;middot; the app streams through whichever relay answers&lt;/div&gt;
+
+&lt;/div&gt;
+
+&lt;div id="appView" aria-hidden="true"&gt;
+  &lt;div class="avBar"&gt;
+    &lt;span class="dot" id="avDot"&gt;&lt;/span&gt;
+    &lt;div class="avTitle"&gt;&lt;b id="avTitle"&gt;Z.ai&lt;/b&gt;&lt;span id="avUrl"&gt;&amp;nbsp;&lt;/span&gt;&lt;/div&gt;
+    &lt;button class="avBtn" id="avBack" aria-label="Back"&gt;&lt;svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"&gt;&lt;path d="m14 6-6 6 6 6"/&gt;&lt;/svg&gt;&lt;/button&gt;
+    &lt;button class="avBtn" id="avReload" aria-label="Reload"&gt;&lt;svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"&gt;&lt;path d="M20 11A8 8 0 0 0 5.6 5.6L4 7"/&gt;&lt;path d="M4 4v3h3"/&gt;&lt;path d="M4 13a8 8 0 0 0 14.4 5.4L20 17"/&gt;&lt;path d="M20 20v-3h-3"/&gt;&lt;/svg&gt;&lt;/button&gt;
+    &lt;button class="avBtn" id="avHome" aria-label="Home"&gt;&lt;svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"&gt;&lt;path d="m3 11 9-8 9 8"/&gt;&lt;path d="M5 10v10h5v-6h4v6h5V10"/&gt;&lt;/svg&gt;&lt;/button&gt;
+    &lt;button class="avBtn close" id="avClose" aria-label="Close"&gt;&lt;svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"&gt;&lt;path d="M6 6l12 12"/&gt;&lt;path d="M18 6 6 18"/&gt;&lt;/svg&gt;&lt;/button&gt;
+  &lt;/div&gt;
+  &lt;div id="avStage"&gt;
+    &lt;iframe id="avFrame" title="Z.ai" referrerpolicy="no-referrer" allow="autoplay; fullscreen; clipboard-write" sandbox="allow-scripts allow-forms allow-modals allow-downloads"&gt;&lt;/iframe&gt;
+    &lt;div id="avLoad"&gt;&lt;i&gt;&lt;/i&gt;&lt;/div&gt;
+    &lt;div id="avErr"&gt;&lt;div class="errWrap"&gt;
+      &lt;div class="errBox" id="avErrTxt"&gt;&lt;/div&gt;
+      &lt;div class="row" style="margin-top:12px"&gt;&lt;button class="btn" id="avRetry"&gt;Retry&lt;/button&gt;&lt;/div&gt;
+      &lt;div class="row" style="margin-top:8px"&gt;&lt;button class="btn ghost" id="avErrSwitch"&gt;Switch relay address&lt;/button&gt;&lt;/div&gt;
+      &lt;div class="relayPanel" id="errRelayPanel"&gt;
+        &lt;div class="rl"&gt;Deployed the same worker code under a new name? Paste its address:&lt;/div&gt;
+        &lt;input id="errRelayInput" type="url" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://new-name.your-account.workers.dev"&gt;
+        &lt;button class="btn" id="errRelayApply"&gt;Use this relay&lt;/button&gt;
+        &lt;div class="chk" id="errRelayDiag"&gt;&lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;&lt;/div&gt;
+  &lt;/div&gt;
+  &lt;div class="avNote"&gt;Z.ai runs inside this file in a locked frame &amp;middot; nothing here ever opens as a web page, so there is nothing for a filter to block&lt;/div&gt;
+&lt;/div&gt;
+
+&lt;div id="toast"&gt;&lt;/div&gt;
+
+&lt;script&gt;
+(function () {
+  'use strict';
+
+  var BAKED_URL = "https://zaihtml.kadharri-minecraft.workers.dev";
+
+  var el = function (id) { return document.getElementById(id); };
+  var toastTimer = null;
+
+  function toast(msg) {
+    var t = el('toast');
+    t.textContent = msg;
+    t.classList.add('on');
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { t.classList.remove('on'); }, 3400);
+  }
+
+  /* localStorage can be unavailable for saved files on some phones —
+   * every access is guarded, the file just loses remembered state. */
+  var store = {
+    get: function (k) { try { return window.localStorage.getItem(k); } catch (e) { return null; } },
+    set: function (k, v) { try { window.localStorage.setItem(k, v); return true; } catch (e) { return false; } }
+  };
+
+  if (typeof BAKED_URL !== 'string' || !/^https?:\/\//.test(BAKED_URL)) {
+    el('btnOpen').disabled = true;
+    el('stTxt').textContent = 'this copy of the file is broken';
+    el('dot').className = 'dot off';
+    document.querySelector('.hero').insertAdjacentHTML('afterbegin',
+      '&lt;div class="errBox" style="margin-bottom:14px"&gt;&lt;b&gt;This copy of zai-pocket.html has no relay address inside.&lt;/b&gt;&lt;br&gt;' +
+      'Save a fresh one from wherever you got this file.&lt;/div&gt;');
+    return;
+  }
+
+  /* ================================================================
+   * v6.1 relay registry — the address baked into this file is only
+   * the FIRST candidate. Relays can be switched at runtime (deploying
+   * the same worker code under a new name = a brand-new address) and
+   * extras are remembered in localStorage. All app traffic flows
+   * through whichever relay answers first.
+   * ================================================================ */
+  var RELAYS = [];        // candidate relay bases, no trailing slash
+  var RELAY = '';         // the ACTIVE relay base
+  var RELAY_NAME = '';
+  var LAST_DIAG = [];     // last probe round, shown in the error card
+
+  function trimSl(u) { return String(u || '').replace(/\/+$/, ''); }
+
+  function loadRelays() {
+    var seen = {};
+    var list = [];
+    function add(u) {
+      if (typeof u !== 'string') return;
+      var s = trimSl(u);
+      if (!/^https?:\/\//i.test(s) || seen[s]) return;
+      seen[s] = 1;
+      list.push(s);
+    }
+    add(BAKED_URL);
+    try {
+      var extra = JSON.parse(store.get('zp_relays') || '[]');
+      if (extra &amp;&amp; typeof extra.length === 'number') {
+        for (var i = 0; i &lt; extra.length; i++) add(extra[i]);
+      }
+    } catch (e) { /* ignore */ }
+    try {
+      var last = JSON.parse(store.get('zp_relay') || 'null');
+      if (last &amp;&amp; typeof last.base === 'string') {
+        var b = trimSl(last.base);
+        var at = list.indexOf(b);
+        if (at &gt; 0) { list.splice(at, 1); list.unshift(b); }
+      }
+    } catch (e) { /* ignore */ }
+    RELAYS = list;
+  }
+  function saveRelays() {
+    var extras = [];
+    for (var i = 0; i &lt; RELAYS.length; i++) {
+      if (RELAYS[i] !== trimSl(BAKED_URL)) extras.push(RELAYS[i]);
+    }
+    store.set('zp_relays', JSON.stringify(extras));
+  }
+
+  function probeRelay(base, tmo) {
+    return new Promise(function (resolve) {
+      var t0 = Date.now();
+      var ctrl = (typeof AbortController === 'function') ? new AbortController() : null;
+      var timer = ctrl ? setTimeout(function () { try { ctrl.abort(); } catch (e) { /* ignore */ } }, tmo || 7000) : null;
+      var opts = { cache: 'no-store', credentials: 'omit' };
+      if (ctrl) opts.signal = ctrl.signal;
+      fetch(base + '/__status', opts).then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      }).then(function (j) {
+        if (timer) clearTimeout(timer);
+        if (j &amp;&amp; typeof j.entry === 'string' &amp;&amp; j.entry.indexOf('/__t/') === 0) {
+          resolve({ base: base, ok: true, entry: j.entry, name: j.name || 'worker', ms: Date.now() - t0 });
+        } else {
+          resolve({ base: base, ok: false, why: 'answered, but an old version (no app entry)', ms: Date.now() - t0 });
+        }
+      }).catch(function (err) {
+        if (timer) clearTimeout(timer);
+        var msg = String((err &amp;&amp; err.message) || err);
+        var why;
+        if (/abort/i.test(msg)) why = 'no answer within ' + Math.round((tmo || 7000) / 1000) + ' s';
+        else if (/^HTTP /.test(msg)) why = 'answered ' + msg;
+        else why = 'unreachable \u00b7 ' + msg.slice(0, 36);
+        resolve({ base: base, ok: false, why: why, ms: Date.now() - t0 });
+      });
+    });
+  }
+
+  function applyRelayHit(hit) {
+    RELAY = hit.base;
+    RELAY_NAME = hit.name || 'worker';
+    statusEntry = hit.entry;
+    store.set('zp_relay', JSON.stringify({ base: RELAY, ts: Date.now() }));
+    el('urlTxt').textContent = RELAY;
+    el('stVer').textContent = RELAY_NAME;
+  }
+
+  var pickBusy = false;
+  var pickQueue = [];
+  function pickRelay(report, avoid) {
+    return new Promise(function (resolve) {
+      if (pickBusy) { pickQueue.push(resolve); return; }
+      pickBusy = true;
+      var order = RELAYS.slice(0);
+      if (avoid) {
+        var ai = order.indexOf(avoid);
+        if (ai &gt;= 0) { order.splice(ai, 1); order.push(avoid); }
+      }
+      var diags = [];
+      var idx = 0;
+      function finish(hit) {
+        pickBusy = false;
+        while (pickQueue.length) pickQueue.shift()(hit);
+        resolve(hit);
+      }
+      function step() {
+        if (idx &gt;= order.length) { LAST_DIAG = diags; finish(null); return; }
+        var base = order[idx];
+        if (report) {
+          el('chk').textContent = 'trying ' + base + ' \u2026';
+          el('chk').className = 'chk';
+        }
+        probeRelay(base, 7000).then(function (d) {
+          diags.push(d);
+          if (d.ok) {
+            LAST_DIAG = diags;
+            applyRelayHit(d);
+            el('dot').className = 'dot on';
+            el('stTxt').textContent = 'online';
+            el('avDot').className = 'dot on';
+            if (report) {
+              el('chk').textContent = 'relay reachable \u00b7 ' + d.ms + ' ms \u00b7 ' + d.name;
+              el('chk').className = 'chk ok';
+            }
+            finish(d);
+          } else {
+            idx++;
+            step();
+          }
+        });
+      }
+      step();
+    });
+  }
+
+  function check(report) {
+    if (report) {
+      el('chk').textContent = 'checking\u2026';
+      el('chk').className = 'chk';
+    }
+    el('dot').className = 'dot';
+    el('stTxt').textContent = 'checking your relay\u2026';
+    el('stVer').textContent = '';
+    pickRelay(report).then(function (hit) {
+      if (hit) return;
+      el('dot').className = 'dot off';
+      el('stTxt').textContent = 'offline or unreachable';
+      el('stVer').textContent = '';
+      el('avDot').className = 'dot off';
+      el('chk').textContent = 'no relay answered. If you are online, this network is likely blocking the relay address \u2014 tap Change relay address below and point this file at a fresh one.';
+      el('chk').className = 'chk bad';
+      if (report) toast('No relay answered.');
+    });
+  }
+
+  function useRelay(raw, diagEl, done) {
+    var s = trimSl(String(raw || '').trim());
+    var setD = function (msg, cls) {
+      if (!diagEl) return;
+      diagEl.textContent = msg || '';
+      diagEl.className = 'chk' + (cls ? ' ' + cls : '');
+    };
+    if (!/^https?:\/\/[a-z0-9.-]+/i.test(s)) {
+      setD('That does not look like a relay address \u2014 it should be your worker\u2019s https address.', 'bad');
+      return;
+    }
+    setD('checking ' + s.replace(/&lt;/g, '&amp;lt;') + ' \u2026', '');
+    probeRelay(s, 9000).then(function (r) {
+      if (r.ok) {
+        if (RELAYS.indexOf(s) &lt; 0) { RELAYS.push(s); saveRelays(); }
+        applyRelayHit(r);
+        el('dot').className = 'dot on';
+        el('stTxt').textContent = 'online';
+        el('avDot').className = 'dot on';
+        setD('Switched \u2014 ' + r.name + ' answered in ' + r.ms + ' ms.', 'ok');
+        toast('Relay switched to ' + s);
+        if (done) done(true);
+      } else {
+        setD('That relay did not answer: ' + String(r.why).replace(/&lt;/g, '&amp;lt;') + '.', 'bad');
+        if (done) done(false);
+      }
+    });
+  }
+
+  loadRelays();
+  RELAY = RELAYS[0] || '';
+  el('urlTxt').textContent = RELAY;
+
+  /* ================================================================
+   * v5 sandboxed app view — the fetch-fed srcdoc engine
+   *
+   * NOTHING navigates to the worker. The shell fetches documents
+   * through the worker (plain CORS fetch, from this saved file) and
+   * paints them into a null-origin sandbox frame via srcdoc. That is
+   * the whole trick: organization web filters block page VISITS, and
+   * this file never makes one.
+   *
+   * The runtime patch inside each document reports nav / storage /
+   * cookies / title back through postMessage and takes none of its
+   * own decisions — the history stack, the address bar and the
+   * session snapshot all live HERE.
+   * ================================================================ */
+  var av = el('appView'), frame = el('avFrame');
+  var statusEntry = null;      // /__status "entry": tokenized root doc path
+  var NAV = { stack: [], idx: -1 }; // history entries {path, up, method, body, ct}
+  var busy = false;
+  var foBusy = false;       // one auto-failover round at a time
+  var swapArmed = false;       // intentional srcdoc swap in flight (bye sentinel)
+  var helloSeen = false;
+
+  /* ---- per-site session store (survives reloads + srcdoc swaps) ---- */
+  function siteKey() {
+    var host = '';
+    try { var cur = NAV.stack[NAV.idx]; if (cur &amp;&amp; cur.up) host = new URL(cur.up).hostname; } catch (e) { /* ignore */ }
+    return 'zp.site.' + (host || 'root');
+  }
+  var SITE = { ls: {}, jar: [] };
+  function siteLoad() {
+    try {
+      var raw = store.get(siteKey());
+      if (raw) {
+        var j = JSON.parse(raw);
+        if (j &amp;&amp; typeof j.ls === 'object' &amp;&amp; j.ls) SITE.ls = j.ls;
+        if (j &amp;&amp; Array.isArray(j.jar)) SITE.jar = j.jar;
+      }
+    } catch (e) { /* ignore */ }
+  }
+  function siteSave() { store.set(siteKey(), JSON.stringify({ ls: SITE.ls, jar: SITE.jar })); }
+  /* v6: merge a cookie array into the site jar (shared by the runtime's
+   * 'cookies' messages and loadDoc's x-set-cookie ingestion) */
+  function mergeJar(cookies) {
+    if (!Array.isArray(cookies)) return;
+    var m = {};
+    SITE.jar.forEach(function (c) { if (c &amp;&amp; c.name) m[c.name] = c; });
+    cookies.forEach(function (c) { if (c &amp;&amp; c.name) m[c.name] = c; });
+    SITE.jar = Object.keys(m).map(function (k) { return m[k]; });
+    siteSave();
+  }
+
+  /* ---- helpers ---- */
+  function normPath(u) {
+    /* entries arrive as worker paths (/__t/x) or absolute relay URLs */
+    try {
+      var s = String(u || '');
+      for (var i = 0; i &lt; RELAYS.length; i++) {
+        if (s.indexOf(RELAYS[i]) === 0) {
+          var r = s.slice(RELAYS[i].length);
+          return r || '/';
+        }
+      }
+      if (/^https?:\/\//i.test(s)) return null; // foreign origin — not fetchable
+      return s;
+    } catch (e) { return null; }
+  }
+  function setBar(title, url) {
+    el('avTitle').textContent = title || 'Z.ai';
+    el('avUrl').textContent = url || '\u00a0';
+  }
+  function loadOn(on) { el('avLoad').classList.toggle('on', !!on); }
+  function errCard(html) {
+    el('avErrTxt').innerHTML = html;
+    el('avErr').classList.add('on');
+  }
+  function errOff() { el('avErr').classList.remove('on'); }
+
+  function escHtml(s) { return String(s == null ? '' : s).replace(/&amp;/g, '&amp;amp;').replace(/&lt;/g, '&amp;lt;'); }
+  function diagRows() {
+    var out = '';
+    for (var i = 0; i &lt; LAST_DIAG.length; i++) {
+      var d = LAST_DIAG[i];
+      out += '&lt;div class="drow' + (d.ok ? ' ok' : '') + '"&gt;&lt;span class="du"&gt;' + escHtml(d.base) +
+        '&lt;/span&gt;&lt;span class="dv"&gt;' + (d.ok ? 'answered \u00b7 ' + d.ms + ' ms' : escHtml(d.why)) + '&lt;/span&gt;&lt;/div&gt;';
+    }
+    return out;
+  }
+  function showLoadErr(msg, netLevel) {
+    var aborted = /abort|too long/i.test(msg);
+    var html = '&lt;b&gt;' + (netLevel ? 'Could not reach the app.' : 'Could not load the app.') + '&lt;/b&gt;&lt;br&gt;';
+    if (netLevel) {
+      html += 'This file could not fetch anything from &lt;b&gt;' + escHtml(RELAY) + '&lt;/b&gt;' +
+        (aborted ? ' \u2014 the request ran out of time.' : '.');
+      if (LAST_DIAG.length) html += '&lt;div class="dlist"&gt;' + diagRows() + '&lt;/div&gt;';
+      html += '&lt;br&gt;If you are online, this network is probably blocking that address (or the relay is down). ' +
+        'Deploy the same worker code in Cloudflare under a &lt;b&gt;new name&lt;/b&gt; and switch below \u2014 this file then works again with zero changes.';
+    } else {
+      html += 'The relay said: ' + escHtml(msg).slice(0, 140) + '.&lt;br&gt;That is the relay/upstream answering \u2014 usually temporary. Tap Retry.';
+    }
+    el('avErrTxt').innerHTML = html;
+    el('avErr').classList.add('on');
+    el('avDot').className = 'dot off';
+  }
+
+  /* ---- the document loader ------------------------------------------
+   * fetch through the worker → text → stamp session snapshot into
+   * frame.name (synchronous boot hydration inside) → swap the srcdoc. */
+  function loadDoc(entry, push) {
+    if (!RELAY) { showLoadErr('no relay is active in this file', true); return; }
+    var path = normPath(entry.path);
+    if (!path) { errCard('&lt;b&gt;That link points outside the worker.&lt;/b&gt;&lt;br&gt;It cannot be opened from the sandbox.'); return; }
+    if (push) {
+      NAV.stack = NAV.stack.slice(0, NAV.idx + 1);
+      NAV.stack.push(entry);
+      if (NAV.stack.length &gt; 30) NAV.stack.shift();
+      NAV.idx = NAV.stack.length - 1;
+    }
+    if (busy) return;
+    busy = true;
+    siteLoad();
+    errOff();
+    loadOn(true);
+    setBar('Loading\u2026', entry.up || '');
+    /* v6: credentials:'include' — document loads and POST navigations
+     * (login form submits above all) must carry the worker-origin
+     * session cookies upstream; the CORS layer now echoes our null
+     * origin with allow-credentials, so this actually works. */
+    var opts = { method: entry.method || 'GET', cache: 'no-store', credentials: 'include' };
+    if (opts.method !== 'GET' &amp;&amp; opts.method !== 'HEAD' &amp;&amp; entry.body != null) {
+      opts.body = entry.body;
+      if (entry.ct) opts.headers = { 'content-type': entry.ct };
+    }
+    var ctrl = (typeof AbortController === 'function') ? new AbortController() : null;
+    var timer = ctrl ? setTimeout(function () { try { ctrl.abort(); } catch (e) { /* ignore */ } }, 45000) : null;
+    if (ctrl) opts.signal = ctrl.signal;
+    fetch(RELAY + path, opts).then(function (res) {
+      var finalUrl = '';
+      try { finalUrl = res.headers.get('x-final-url') || ''; } catch (e) { /* ignore */ }
+      if (finalUrl) entry.up = finalUrl;
+      /* v6: keep the jar current with cookies the worker just re-issued
+       * (login flows set the session on the DOCUMENT response too) so
+       * the next srcdoc swap boots with them */
+      try {
+        var scH = res.headers.get('x-set-cookie');
+        if (scH) {
+          var rawArr = JSON.parse(decodeURIComponent(scH));
+          if (Array.isArray(rawArr)) {
+            mergeJar(rawArr.map(function (raw) {
+              var bits = String(raw).split(';');
+              var nv = bits[0];
+              var eq = nv.indexOf('=');
+              if (eq &lt; 1) return null;
+              var c = { name: nv.slice(0, eq).trim(), value: nv.slice(eq + 1).trim() };
+              for (var i = 1; i &lt; bits.length; i++) {
+                var b = bits[i].trim().toLowerCase();
+                if (b === 'max-age=0') c.del = true;
+              }
+              return c.del ? null : c;
+            }).filter(Boolean));
+          }
+        }
+      } catch (eSC) { /* ignore */ }
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      return res.text().then(function (text) {
+        if (!text || text.length &lt; 40) throw new Error('empty document');
+        swapArmed = true;
+        helloSeen = false;
+        try { frame.name = JSON.stringify({ zp: 1, ls: SITE.ls, jar: SITE.jar }); } catch (eName) { /* ignore */ }
+        frame.srcdoc = text;
+        setBar('Z.ai', entry.up || '');
+        el('avDot').className = 'dot on';
+      });
+    }).catch(function (err) {
+      var msg = String((err &amp;&amp; err.message) || err);
+      var netLevel = !/^HTTP /.test(msg) &amp;&amp; msg !== 'empty document';
+      el('avDot').className = 'dot off';
+      if (netLevel &amp;&amp; !foBusy) {
+        /* transport-level failure — the relay itself is suspect: probe the
+         * other candidates (this one last), switch if one answers, and
+         * retry this exact entry once. Otherwise the honest error card. */
+        foBusy = true;
+        var bad = RELAY;
+        loadOn(false);
+        pickRelay(false, bad).then(function (hit) {
+          foBusy = false;
+          if (hit &amp;&amp; hit.base !== bad) {
+            toast('Relay ' + bad + ' did not answer \u2014 switched to ' + hit.base + ', retrying.');
+            retryLoad();
+          } else {
+            showLoadErr(msg, true);
+          }
+        });
+      } else {
+        showLoadErr(msg, netLevel);
+      }
+    }).finally(function () {
+      if (timer) clearTimeout(timer);
+      busy = false;
+      loadOn(false);
+    });
+  }
+
+  function retryLoad() { var cur = NAV.stack[NAV.idx]; if (cur) loadDoc(cur, false); }
+
+  /* ---- opening the app ---- */
+  function openApp() {
+    av.classList.add('on');
+    av.setAttribute('aria-hidden', 'false');
+    document.body.classList.add('locked');
+    if (NAV.idx &gt;= 0) { retryLoad(); return; }
+    if (statusEntry &amp;&amp; RELAY) {
+      loadDoc({ path: statusEntry, up: '', method: 'GET' }, true);
+      return;
+    }
+    /* the entry token comes from /__status — the boot health check may
+     * still be in flight when the user taps fast; queue behind it */
+    el('avDot').className = 'dot';
+    pickRelay(false).then(function (hit) {
+      if (hit &amp;&amp; statusEntry) loadDoc({ path: statusEntry, up: '', method: 'GET' }, true);
+      else if (hit) showLoadErr('the relay named no app entry', false);
+      else showLoadErr('no relay answered', true);
+    });
+  }
+
+  el('btnOpen').addEventListener('click', openApp);
+
+  el('avClose').addEventListener('click', function () {
+    av.classList.remove('on');
+    av.setAttribute('aria-hidden', 'true');
+    document.body.classList.remove('locked');
+  });
+  el('avBack').addEventListener('click', function () { go(-1); });
+  el('avReload').addEventListener('click', retryLoad);
+  el('avHome').addEventListener('click', function () {
+    if (statusEntry) loadDoc({ path: statusEntry, up: '', method: 'GET' }, true);
+  });
+  function go(delta) {
+    var ni = NAV.idx + delta;
+    if (ni &lt; 0 || ni &gt;= NAV.stack.length) { toast(delta &lt; 0 ? 'No earlier page.' : 'No forward page.'); return; }
+    NAV.idx = ni;
+    loadDoc(NAV.stack[NAV.idx], false);
+  }
+
+  /* ---- messages from the sandbox runtime ---- */
+  window.addEventListener('message', function (e) {
+    var d = e.data;
+    if (!d || d.zai !== 1) return;
+    /* the frame is a null-origin srcdoc child of THIS file — only it
+     * (and the worker itself, same-origin) speaks this protocol */
+    try {
+      if (e.source &amp;&amp; e.source !== frame.contentWindow &amp;&amp; e.origin !== RELAY) return;
+    } catch (eSrc) { /* ignore */ }
+    switch (d.type) {
+      case 'hello':
+        helloSeen = true;
+        swapArmed = false;
+        try {
+          frame.contentWindow.postMessage({ zai: 1, cmd: 'init', jar: SITE.jar, ls: SITE.ls }, '*');
+        } catch (eI) { /* ignore */ }
+        if (d.title) setBar(d.title, (NAV.stack[NAV.idx] || {}).up || d.url || '');
+        break;
+      case 'navreq':
+        /* a navigation REQUEST from the runtime (link click, form submit,
+         * SPA redirect): fetch the destination as a fresh sandboxed doc */
+        if (d.url) {
+          loadDoc({ path: d.url, up: d.up || '', method: d.method || 'GET', body: d.body || null, ct: d.ct || null }, true);
+        }
+        break;
+      case 'nav':
+        if (d.title !== undefined) {
+          setBar(d.title || 'Z.ai', (NAV.stack[NAV.idx] || {}).up || d.url || '');
+        }
+        break;
+      case 'hist':
+        /* soft SPA transition — update the current entry in place */
+        {
+          var cur = NAV.stack[NAV.idx];
+          var np = normPath(d.url);
+          if (cur) {
+            if (np) cur.path = np;
+            if (d.up) cur.up = d.up;
+          }
+          setBar(el('avTitle').textContent || 'Z.ai', d.up || (cur || {}).up || '');
+        }
+        break;
+      case 'ext':
+        toast('The app wanted to open ' + d.url + ' — that is outside the sandbox, so it stayed put.');
+        break;
+      case 'cookies':
+        mergeJar(d.cookies);
+        break;
+      case 'ls':
+        if (d.store === 'localStorage' &amp;&amp; d.k) {
+          if (d.k === '__clear__') SITE.ls = {};
+          else if (d.v === null) delete SITE.ls[d.k];
+          else SITE.ls[d.k] = String(d.v);
+          siteSave();
+        }
+        break;
+      case 'goback': go(-1); break;
+      case 'gofwd': go(1); break;
+      case 'reloadreq': retryLoad(); break;
+      case 'bye':
+        /* the frame's document went somewhere on its own — only a real
+         * escape if it was NOT our intentional srcdoc swap */
+        if (!swapArmed &amp;&amp; helloSeen) {
+          toast('Recovered a stray navigation — reloading the app.');
+          retryLoad();
+        }
+        break;
+      case 'err':
+        break; /* page errors are noisy in sandboxes; the bar dot already tells health */
+    }
+  });
+
+  /* ---- relay controls (v6.1) ---- */
+  check(true);
+  el('btnCheck').addEventListener('click', function () { check(false); });
+  el('btnRelay').addEventListener('click', function () {
+    var p = el('relayPanel');
+    p.classList.toggle('on');
+    if (p.classList.contains('on')) { try { el('relayInput').focus(); } catch (e) { /* ignore */ } }
+  });
+  el('relayApply').addEventListener('click', function () {
+    useRelay(el('relayInput').value, el('relayDiag'), function (ok) {
+      if (!ok) return;
+      el('relayPanel').classList.remove('on');
+      if (av.classList.contains('on')) {
+        if (NAV.idx &gt;= 0) retryLoad(); else openApp();
+      }
+    });
+  });
+  el('avRetry').addEventListener('click', function () {
+    errOff();
+    if (NAV.idx &gt;= 0) retryLoad(); else openApp();
+  });
+  el('avErrSwitch').addEventListener('click', function () {
+    var p = el('errRelayPanel');
+    p.classList.toggle('on');
+    if (p.classList.contains('on')) { try { el('errRelayInput').focus(); } catch (e) { /* ignore */ } }
+  });
+  el('errRelayApply').addEventListener('click', function () {
+    useRelay(el('errRelayInput').value, el('errRelayDiag'), function (ok) {
+      if (!ok) return;
+      el('errRelayPanel').classList.remove('on');
+      errOff();
+      if (NAV.idx &gt;= 0) retryLoad(); else openApp();
+    });
+  });
+
+  /* ---- copy the relay link ---- */
+  el('btnCopyUrl').addEventListener('click', function () {
+    var link = RELAY || RELAYS[0] || '';
+    var done = function () { toast('Relay link copied.'); };
+    var fallback = function () {
+      try {
+        var ta = document.createElement('textarea');
+        ta.value = link;
+        ta.style.cssText = 'position:fixed;left:-9999px;top:0';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.setSelectionRange(0, ta.value.length);
+        var okc = document.execCommand('copy');
+        ta.remove();
+        if (okc) done();
+        else toast('Copy blocked \u2014 long-press the link above and choose Copy.');
+      } catch (e) {
+        toast('Copy blocked \u2014 long-press the link above and choose Copy.');
+      }
+    };
+    if (navigator.clipboard &amp;&amp; navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(link).then(done, fallback);
+    } else {
+      fallback();
+    }
+  });
+
+  /* ---- auto-open with a cancellable countdown ---- */
+  var AUTO_KEY = 'zp_auto';
+  var box = el('auto');
+  box.checked = store.get(AUTO_KEY) === '1';
+  var cdIv = null;
+
+  function stopCountdown(keepPref) {
+    if (cdIv) { clearInterval(cdIv); cdIv = null; }
+    el('cdRow').classList.remove('on');
+    if (!keepPref) {
+      box.checked = false;
+      store.set(AUTO_KEY, '0');
+    }
+  }
+
+  box.addEventListener('change', function () {
+    var on = box.checked;
+    var saved = store.set(AUTO_KEY, on ? '1' : '0');
+    if (on) {
+      toast(saved ? 'Will open Z.ai automatically from now on.' : 'Auto-open works until this file is closed (storage is blocked here).');
+      startCountdown();
+    } else {
+      stopCountdown(true);
+      toast('Auto-open off.');
+    }
+  });
+
+  function startCountdown() {
+    if (cdIv) return;
+    var n = 5;
+    el('cd').textContent = String(n);
+    el('cdRow').classList.add('on');
+    cdIv = setInterval(function () {
+      n--;
+      if (n &lt;= 0) {
+        stopCountdown(true);
+        openApp();
+      } else {
+        el('cd').textContent = String(n);
+      }
+    }, 1000);
+  }
+
+  el('cdCancel').addEventListener('click', function () {
+    stopCountdown(false);
+    toast('Auto-open turned off.');
+  });
+
+  if (box.checked) startCountdown();
+})();
+&lt;/script&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+</textarea>
+  </details>
+
+  <h2 class="sec"><span class="n">2</span>zai-proxy-worker.js — the Cloudflare worker</h2>
+
+  <div class="card">
+    <b>Deploy it (one-time, about 2 minutes)</b>
+    <ol>
+      <li>Tap <b>Copy</b> below — the whole worker code goes to your clipboard.</li>
+      <li>Go to <b>dash.cloudflare.com</b> → <b>Workers &amp; Pages</b> → your worker (<b>zaihtml</b>) → <b>Edit code</b>.</li>
+      <li>Select all in the editor, paste, then <b>Save and Deploy</b>.</li>
+      <li>Check it: open <b>your-worker.workers.dev/__status</b> — it should say <b>zp service 6.0</b>.</li>
+    </ol>
+    <div class="note">v6 relay: credentialed CORS (sign-in works), path-preserving <b>/__o/</b> handles with an injected base tag (lazy route chunks load — no dead buttons), sandbox-safe SPA routing, opaque tokens everywhere (no readable hostname in any request URL), neutral root page so the address cannot be content-classified. The app file is a v6.1 pocket: switchable relay + auto-failover.</div>
+  </div>
+
+  <div class="card">
+    <b>If the relay address ever stops answering on your phone</b>
+    <ol>
+      <li>Open the pocket file — the app view will show an error card with a <b>per-address diagnosis</b> (unreachable / timed out / answered with an error).</li>
+      <li>If it says <b>unreachable while you are online</b>, your network is probably blocking that address. Fix it in 2 minutes, no chat needed: in Cloudflare go to <b>Workers &amp; Pages → Create → Worker → give it any NEW name</b> (for example <b>zr-relay-2</b>), edit its code, paste this same worker code, deploy.</li>
+      <li>The new worker has a <b>brand-new address</b> (new-name.your-account.workers.dev). In the pocket tap <b>Change relay address</b> (home screen) or <b>Switch relay address</b> (error card) and paste the new address.</li>
+      <li>The file remembers it. Old address blocked forever? Irrelevant — the file now uses the new one. Repeat any time it happens again; the code never changes.</li>
+    </ol>
+  </div>
+
+  <div class="meta" id="metaWorker">checking the embedded file…</div>
+
+  <button class="btn" id="wCopy">Copy zai-proxy-worker.js</button>
+  <div class="row">
+    <button class="btn ghost" id="wSave">Save the file</button>
+    <button class="btn ghost" id="wSel">Select all</button>
+  </div>
+  <details id="detWorker"><summary>Show the code</summary>
+    <textarea id="codeWorker" readonly="" spellcheck="false" autocapitalize="off" autocorrect="off" wrap="soft" aria-label="zai-proxy-worker.js contents">/* ============================================================
+ * z.ai pocket — Cloudflare Worker relay (v5)
+ * ------------------------------------------------------------
+ * WHAT THIS DOES (v5 — the "no-navigation" architecture)
+ *   The phone's browser NEVER opens this worker as a web page.
+ *   The saved pocket file (zai-pocket.html) is the app shell: it
+ *   FETCHES every document, script, stylesheet and API call
+ *   through this worker with plain CORS fetch() — nothing ever
+ *   navigates to the worker origin — and paints the app inside a
+ *   locked null-origin sandbox frame in the file itself.
+ *   Organization web filters intercept NAVIGATIONS (that is the
+ *   "blocked by your organization" page); fetch() calls from a
+ *   saved local file sail past them. This is the same concept the
+ *   Relay "super worker" uses, rebuilt custom for z.ai.
+ *
+ *   On top of that, the worker's own root serves only a small
+ *   neutral status page — never z.ai content — so the hostname
+ *   can never be content-classified as an AI-chatbot site, and
+ *   every upstream URL stays an opaque /__t/&lt;token&gt; (v4 scheme).
+ *
+ * HISTORY
+ *   v3 — dropped Cloudflare-edge headers before forwarding (WAF
+ *        bait), added the one-shot 403/429 clean retry, /__diag.
+ *   v4 — opaque tokens for every cross-host URL in HTML/CSS/
+ *        redirects/runtime mapping: no readable upstream hostname
+ *        in any request the phone makes.
+ *   v5 — THE BIG ONE: sandbox-first serving. (1) Root and every
+ *        bare path answer a neutral page/JSON — the transparent
+ *        chat.z.ai catch-all is GONE, so nothing at this origin
+ *        looks like z.ai to a classifier. (2) Documents served
+ *        through /__t/&lt;token&gt; now carry cfg.sd (sandbox mode):
+ *        the injected runtime patch boots a fake location object
+ *        (__zaiLoc) whose reads report the REAL upstream URL and
+ *        whose writes postMessage the shell instead of navigating
+ *        the frame. (3) Served JavaScript gets a conservative
+ *        location-assignment rewrite (location.href = X →
+ *        __zaiLoc.href = X etc.) so SPA redirects never navigate
+ *        the sandbox frame. (4) /__status gains "entry": the
+ *        tokenized root-document path, so the pocket file can
+ *        boot the app without knowing the token key.
+ *
+ * DEPLOY (you already have a worker)
+ *   1. dash.cloudflare.com → Workers &amp; Pages → your worker
+ *   2. "Edit code" / Quick Edit → select all → paste this file
+ *   3. Save &amp; Deploy
+ *   4. (optional) Settings → Variables → PROXY_TOKEN with a long
+ *      random string, and/or EXTRA_HOSTS="a.com,b.com" to
+ *      allowlist more first-party hosts.
+ *   5. Save the new zai-pocket.html on the phone and use its
+ *      "Open Z.ai (sandboxed)" button — the app streams into the
+ *      file through this worker. Do NOT open the worker URL in
+ *      the browser; it is only a relay now.
+ *
+ * ROUTES
+ *   /            -&gt; neutral service page (token setup form when
+ *                   PROXY_TOKEN is set). NEVER z.ai content.
+ *   /__t/&lt;token&gt; -&gt; https://&lt;upstream-url&gt;   the ONLY content
+ *                   route: opaque token = absolute upstream URL
+ *                   XOR-encrypted + base64url'd. CORS-open for
+ *                   every origin (the pocket file fetches it),
+ *                   every method, cookies relayed via x-set-cookie
+ *                   + x-cookie, final URL reported as x-final-url.
+ *   /__status    -&gt; health-check JSON + "entry" (the tokenized
+ *                   root document path — the pocket file's app
+ *                   boot handle). Neutral: no z.ai strings.
+ *   /__diag      -&gt; live upstream probe report (three probes,
+ *                   plain-English verdict).
+ *   /__clear     -&gt; expire session cookies, back to /
+ *   /favicon.ico -&gt; 204 (neutral — never a proxied page)
+ *   /p/&lt;host&gt;/*  -&gt; legacy v3 form, still accepted for stale
+ *                   caches, never emitted.
+ *   anything else (bare path) -&gt; neutral 404 JSON. The transparent
+ *                   chat.z.ai mirroring is GONE in v5: the phone
+ *                   never navigates here, so it serves nothing.
+ *
+ * SECURITY
+ *   - Only z.ai / chatglm.cn / chatglm.site family hosts are
+ *     proxied. This is NOT an open proxy.
+ *   - With PROXY_TOKEN set, everything except the token page,
+ *     /__status and /__diag requires the token.
+ *   - Upstream set-cookies are relayed to the sandbox runtime via
+ *     the CORS-exposed x-set-cookie header; the runtime replays
+ *     them as x-cookie. Nothing is stored at this origin.
+ * ============================================================ */
+
+const VERSION = 'zp service 6.0';
+
+/* z.ai first-party family (suffix match — covers subdomains) */
+const ALLOW = [
+  'z.ai',               // chat.z.ai, zcode.z.ai, *.space-z.ai sandboxes, ...
+  'chatglm.cn',         // z-cdn.chatglm.cn (frontend assets), z-cdn-media, cdn-proxy, sdata
+  'chatglm.site',       // artifacts-cdn, adapter-prod, test envs
+  'glm-chat.oss-cn-hongkong.aliyuncs.com', // file upload/download bucket
+  'alicdn.com',         // o.alicdn.com — z.ai's shared frontend libs (jquery …)
+  'aliyuncs.com'        // sdk.rum / log endpoints the z.ai frontend loads at boot
+];
+
+/* ---- v4: opaque request tokens ----------------------------------------
+ * Every upstream URL this worker embeds in a response (attr values,
+ * css url()s, redirect Locations) and every cross-host URL the
+ * runtime patch maps in the browser is XOR-obfuscated + base64url'd
+ * as /__t/&lt;token&gt; so NO upstream hostname (z.ai, chatglm.cn,
+ * alicdn …) is ever readable in a request the phone makes.
+ * Organization content filters decode query strings and paths and
+ * category-block those hosts even though the request already flows
+ * through this worker — opaque tokens end that. The key is shared
+ * with the runtime patch via window.__ZAI__.key (build asserts the
+ * template carries exactly one TOK_KEY definition). ?url= is NOT
+ * accepted: tokens are the only way in. */
+const TOK_KEY = 'zaiwtok-4-0-0-K9mVx2qT';
+
+function encTok(u) {
+  const bytes = new TextEncoder().encode(String(u));
+  let s = '';
+  for (let i = 0; i &lt; bytes.length; i++) {
+    s += String.fromCharCode(bytes[i] ^ TOK_KEY.charCodeAt(i % TOK_KEY.length));
+  }
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function decTok(t) {
+  try {
+    const s = atob(String(t || '').replace(/-/g, '+').replace(/_/g, '/').trim());
+    const bytes = new Uint8Array(s.length);
+    for (let i = 0; i &lt; s.length; i++) {
+      bytes[i] = s.charCodeAt(i) ^ TOK_KEY.charCodeAt(i % TOK_KEY.length);
+    }
+    return new TextDecoder().decode(bytes);
+  } catch (e) { return null; }
+}
+
+function tokPath(absUrl) {
+  try { return '/__t/' + encTok(absUrl); } catch (e) { return null; }
+}
+
+/* v6: path-preserving origin-token form — '/__o/&lt;encTok(origin)&gt;&lt;path&gt;&lt;search&gt;'.
+ * Relative URL resolution (dynamic import("./chunk.js"), css url(),
+ * &lt;base&gt;-resolved runtime urls) needs the upstream PATH to ride along
+ * in cleartext; the HOSTNAME — what org filters key on — stays encrypted. */
+function oTokPath(absUrl) {
+  try {
+    const u = new URL(absUrl);
+    const ot = encTok(u.origin);
+    if (!ot) return null;
+    return '/__o/' + ot + u.pathname + u.search;
+  } catch (e) { return null; }
+}
+
+/* upstream origin for the /chat route (env CHAT_UPSTREAM overrides, e.g. for staging) */
+function chatUpstream(event) { return envOf(event).CHAT_UPSTREAM || 'https://chat.z.ai'; }
+function chatHost(event) {
+  try { return new URL(chatUpstream(event)).host; } catch (e) { return 'chat.z.ai'; }
+}
+
+/* markers filled by the build script */
+const PATCH_JS = [
+"/* ============================================================",
+" * z.ai pocket \u2014 runtime patch (v4)",
+" * Injected by the proxy worker into every proxied HTML document",
+" * as the FIRST script inside &lt;head&gt;. It rewrites every network",
+" * call, navigation and popup so the SPA believes it lives on its",
+" * real origin while every byte actually flows through the worker.",
+" *",
+" * v4 \u2014 OPAQUE TOKENS: every cross-host URL mapped here becomes",
+" * /__t/&lt;gibberish&gt; (the absolute upstream URL XOR-encrypted +",
+" * base64url'd with the key the worker injected as __ZAI__.key).",
+" * NO request the browser makes carries a readable upstream",
+" * hostname \u2014 organization content filters read URLs and",
+" * category-block z.ai / chatglm / alicdn hosts, which is what",
+" * killed the /p/&lt;host&gt;/\u2026 form this patch used to emit.",
+" *",
+" * NOTE: this source is embedded inside a &lt;script&gt; tag in proxied",
+" * pages, so it must never contain the literal sequence \"&lt;/scr\" +",
+" * \"ipt&gt;\" \u2014 keep it that way.",
+" * ============================================================ */",
+"(function () {",
+"  'use strict';",
+"  if (window.__ZAI_PATCHED__) return;",
+"  window.__ZAI_PATCHED__ = true;",
+"",
+"  var CFG = window.__ZAI__ || {};",
+"  var PFX = CFG.pfx || '';            // proxy prefix for this document, '' = transparent root",
+"  var HOST = (CFG.host || '').toLowerCase(); // upstream host this document belongs to",
+"  var WORKER = CFG.worker || '';      // worker origin, e.g. https://name.workers.dev",
+"  var TOKEN = CFG.token || '';        // optional shared proxy token",
+"  var ALLOW = CFG.allow || [];        // allowlisted host suffixes",
+"  var KEY = CFG.key || '';            // v4 opaque-token key (shared with the worker)",
+"  var TOK = !!CFG.tok;                // true when this doc was served through /__t/&lt;token&gt;",
+"  var DOC = CFG.doc || '';            // that token's absolute upstream URL (TOK mode)",
+"  var SD = !!CFG.sd;                  // v5: sandbox mode \u2014 this document is being",
+"                                      // painted into a null-origin srcdoc frame by",
+"                                      // the pocket shell. NEVER navigate: every",
+"                                      // destination goes to the shell by postMessage.",
+"",
+"  var jar = [];                       // fallback cookie jar (mirrored by the shell)",
+"  var lsMirror = {};                  // fallback localStorage mirror (for browsers that block it in iframes)",
+"  var upQueue = [];",
+"",
+"  /* ---------- v5: absolute worker URLs --------------------------------",
+"   * Inside the sandbox frame the document sits at about:srcdoc, so a",
+"   * mapped path like /__t/&lt;token&gt; is unresolvable on its own \u2014 it must",
+"   * be absolutized against the worker origin for fetch/XHR/ES/beacons. */",
+"  function absW(p) {",
+"    try {",
+"      if (!SD || typeof p !== 'string' || !/^\\//.test(p)) return p;",
+"      return WORKER.replace(/\\/$/, '') + p;",
+"    } catch (e) { return p; }",
+"  }",
+"",
+"  /* ---------- v5: is this URL the WORKER's own (already proxied)? ------",
+"   * The worker rewrites HTML attrs into ABSOLUTE worker URLs",
+"   * (https://worker/__t/\u2026). Those are NOT \"external\" \u2014 but the",
+"   * allowlist only knows upstream hosts, so every nav branch must",
+"   * recognize worker-origin URLs FIRST or it would eat them as",
+"   * outside-the-proxy links (the auto-submit E2E caught exactly that:",
+"   * a rewritten form action dropped as \"external\"). */",
+"  function isWorkerUrl(u) {",
+"    try {",
+"      if (!SD || !WORKER) return false;",
+"      var s = String(u || '');",
+"      var w = WORKER.replace(/\\/$/, '');",
+"      return s === w || s.indexOf(w + '/') === 0 || s.indexOf(w.replace(/^http/, 'ws')) === 0;",
+"    } catch (e) { return false; }",
+"  }",
+"",
+"  /* ---------- v5: navigation request to the shell ---------------------",
+"   * nav(u) sends the shell everything it needs to re-render the app at",
+"   * a new URL as a FRESH sandboxed document: the worker path to fetch",
+"   * (tokenized here \u2014 the shell has no key) and the upstream URL for",
+"   * its address bar / history entry. POST navigations (form submits)",
+"   * carry method/body/content-type too. */",
+"  function nav(u, method, body, ct) {",
+"    try {",
+"      var s = (u == null) ? '' : String(u);",
+"      var mapped = mapUrl(s);",
+"      var upUrl = '';",
+"      try { upUrl = new URL(s, DOC || location.href).href; } catch (eU) { upUrl = s; }",
+"      up({ type: 'navreq', url: mapped, up: upUrl, method: method || 'GET', body: body || null, ct: ct || null });",
+"      return s;",
+"    } catch (e) { return u; }",
+"  }",
+"",
+"  /* ---------- v5: fake location (window.__zaiLoc) ---------------------",
+"   * The worker's JS pass rewrites location.&lt;prop&gt; tokens in served",
+"   * scripts to __zaiLoc.&lt;prop&gt;. Reads answer the REAL upstream URL",
+"   * (SPA routers hydrate as if the page lived at chat.z.ai); the href",
+"   * setter (and assign/replace/reload) turn navigations into nav()",
+"   * postMessages instead of steering the sandbox frame anywhere.",
+"   * v6: the underlying URL is MUTABLE \u2014 the pushState/replaceState",
+"   * shims advance it (below) so a router that re-reads",
+"   * window.location.pathname after an SPA transition sees the NEW",
+"   * path, exactly like the real location object. A frozen fake was why",
+"   * chat.z.ai/auth rendered the HOME view: the URL bar moved but the",
+"   * router's own re-resolution still read \"/\". */",
+"  var LOC = { u: null };",
+"  try { LOC.u = DOC ? new URL(DOC) : null; } catch (eLoc0) { LOC.u = null; }",
+"  function setLoc(abs) {",
+"    try { LOC.u = new URL(String(abs)); } catch (eSet) { /* keep old */ }",
+"  }",
+"  function makeLoc() {",
+"    function prop(name, fb) {",
+"      try { return LOC.u ? LOC.u[name] : fb; } catch (e) { return fb; }",
+"    }",
+"    var loc = {};",
+"    Object.defineProperty(loc, 'href', {",
+"      get: function () { return LOC.u ? LOC.u.href : (DOC || 'about:srcdoc'); },",
+"      set: function (v) { nav(v); return v; },",
+"      configurable: true",
+"    });",
+"    loc.assign = function (v) { nav(v); };",
+"    loc.replace = function (v) { nav(v); };",
+"    loc.reload = function () { up({ type: 'reloadreq' }); };",
+"    loc.toString = function () { return LOC.u ? LOC.u.href : (DOC || 'about:srcdoc'); };",
+"    ['origin', 'protocol', 'host', 'hostname', 'port', 'pathname', 'search', 'hash'].forEach(function (k) {",
+"      try {",
+"        Object.defineProperty(loc, k, {",
+"          get: function () {",
+"            if (!LOC.u) return k === 'origin' || k === 'host' || k === 'hostname' ? '' : (k === 'protocol' ? 'https:' : (k === 'pathname' ? '/' : ''));",
+"            return LOC.u[k];",
+"          },",
+"          configurable: true",
+"        });",
+"      } catch (e) { /* ignore */ }",
+"    });",
+"    return loc;",
+"  }",
+"  if (SD) {",
+"    try { window.__zaiLoc = makeLoc(); } catch (eL) { /* ignore */ }",
+"    /* document.URL / baseURI / documentURI \u2014 the parser reports",
+"     * about:srcdoc; SPA hydration wants the real upstream URL. These",
+"     * are plain accessors on Document.prototype (NOT unforgeable),",
+"     * so they can be re-pointed at the upstream doc URL. */",
+"    try {",
+"      ['URL', 'baseURI', 'documentURI'].forEach(function (k) {",
+"        Object.defineProperty(Document.prototype, k, {",
+"          get: function () { return DOC || 'about:srcdoc'; },",
+"          configurable: true",
+"        });",
+"      });",
+"    } catch (eD) { /* ignore */ }",
+"  }",
+"",
+"  /* ---------- v5: window.name boot hydration --------------------------",
+"   * The shell stamps the frame's name with a snapshot {zp:1, ls, jar}",
+"   * BEFORE assigning the srcdoc \u2014 it is readable synchronously here,",
+"   * so the app's own scripts (which run after this patch) find their",
+"   * session cookies and localStorage already populated. No race. */",
+"  try {",
+"    if (SD &amp;&amp; window.name) {",
+"      var boot = JSON.parse(window.name);",
+"      if (boot &amp;&amp; boot.zp === 1) {",
+"        if (boot.ls &amp;&amp; typeof boot.ls === 'object') {",
+"          Object.keys(boot.ls).forEach(function (k) { if (!(k in lsMirror)) lsMirror[k] = String(boot.ls[k]); });",
+"        }",
+"        if (Array.isArray(boot.jar)) {",
+"          var jarMap = {};",
+"          jar.forEach(function (c) { if (c &amp;&amp; c.name) jarMap[c.name] = c; });",
+"          boot.jar.forEach(function (c) { if (c &amp;&amp; c.name) jarMap[c.name] = c; });",
+"          jar = Object.keys(jarMap).map(function (k) { return jarMap[k]; });",
+"        }",
+"      }",
+"    }",
+"  } catch (eN) { /* ignore */ }",
+"",
+"  /* ---------- messaging ---------- */",
+"  function up(msg) {",
+"    try {",
+"      msg.zai = 1;",
+"      if (window.parent &amp;&amp; window.parent !== window) window.parent.postMessage(msg, '*');",
+"    } catch (e) { /* ignore */ }",
+"  }",
+"",
+"  /* ---------- on-page toast (top-level mode: no shell above us) ---------- */",
+"  var toastCount = 0;",
+"  function pageToast(msg) {",
+"    try {",
+"      if (window.parent &amp;&amp; window.parent !== window) return; // shell handles messages",
+"      if (toastCount &gt;= 4) return;",
+"      toastCount++;",
+"      var d = document.createElement('div');",
+"      d.textContent = msg;",
+"      d.setAttribute('style', 'position:fixed;left:12px;right:12px;bottom:max(18px,env(safe-area-inset-bottom));z-index:2147483647;background:#20232F;color:#E7E9EE;border:1px solid rgba(255,255,255,.16);border-radius:14px;padding:13px 15px;font:13px/1.5 -apple-system,BlinkMacSystemFont,system-ui,\"Segoe UI\",Roboto,sans-serif;box-shadow:0 12px 32px rgba(0,0,0,.45);word-break:break-all;opacity:0;transition:opacity .25s;pointer-events:none');",
+"      (document.body || document.documentElement).appendChild(d);",
+"      var raf = window.requestAnimationFrame || function (f) { setTimeout(f, 16); };",
+"      raf(function () { d.style.opacity = '1'; });",
+"      setTimeout(function () {",
+"        try { d.style.opacity = '0'; setTimeout(function () { d.remove(); }, 300); } catch (e) { /* ignore */ }",
+"      }, 4500);",
+"    } catch (e) { /* ignore */ }",
+"  }",
+"",
+"  /* ---------- host matching ---------- */",
+"  function allowedHost(h) {",
+"    h = (h || '').toLowerCase().replace(/\\.$/, '');",
+"    if (!h) return false;",
+"    for (var i = 0; i &lt; ALLOW.length; i++) {",
+"      var a = String(ALLOW[i]).toLowerCase();",
+"      if (h === a || h.slice(-(a.length + 1)) === '.' + a) return true;",
+"    }",
+"    return false;",
+"  }",
+"",
+"  /* ---------- v4 opaque tokens (mirror of the worker's encTok) ---------- */",
+"  function encTok(u) {",
+"    try {",
+"      if (!KEY) return null;",
+"      var bytes = new TextEncoder().encode(String(u));",
+"      var s = '';",
+"      for (var i = 0; i &lt; bytes.length; i++) {",
+"        s += String.fromCharCode(bytes[i] ^ KEY.charCodeAt(i % KEY.length));",
+"      }",
+"      return btoa(s).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');",
+"    } catch (e) { return null; }",
+"  }",
+"  function tokPath(absUrl) {",
+"    var t = encTok(absUrl);",
+"    return t ? '/__t/' + t : null;",
+"  }",
+"",
+"  /* ---------- proxy-path bookkeeping ----------",
+"   * Guards against double-prefixing and recognises URLs that already",
+"   * point at the worker (same-origin) instead of the upstream host.",
+"   */",
+"  function originStr() {",
+"    try { return location.origin || (location.protocol + '//' + location.host); } catch (e) { return ''; }",
+"  }",
+"  function hasPfx(str) {",
+"    if (!PFX) return true;",
+"    if (str === PFX) return true;",
+"    return str.indexOf(PFX) === 0 &amp;&amp; /^[\\/?#;]/.test(str.charAt(PFX.length));",
+"  }",
+"  function isCrossHostPath(str) { // \"/p/&lt;allowlisted host&gt;/\u2026\"",
+"    if (/^\\/p\\//.test(str)) {",
+"      var h = str.slice(3).split(/[\\/?#]/)[0].toLowerCase();",
+"      if (allowedHost(h)) return true;",
+"    }",
+"    return false;",
+"  }",
+"  function isProxyPath(p) {",
+"    if (!p) return false;",
+"    if (hasPfx(p)) return true;",
+"    if (isCrossHostPath(p)) return true;",
+"    if (/^\\/__(t|o)\\//.test(p)) return true; // v4/v6 token paths (full-URL / origin+path)",
+"    if (/^\\/__(status|clear)([\\/?#]|$)/.test(p)) return true;",
+"    return false;",
+"  }",
+"",
+"  /* ---------- URL mapping (v4: opaque tokens for cross-host URLs) ----------",
+"   * absolute / protocol-relative allowlisted URLs -&gt; /__t/&lt;token&gt;",
+"   * same-host (chat) absolute URLs -&gt; bare worker paths (no hostname)",
+"   * root-absolute paths -&gt; PFX + path  (they belong to this doc's upstream host)",
+"   * relative / data: / blob: / #...   -&gt; untouched",
+"   * TOK mode (doc served through /__t/&lt;token&gt;): every reference is",
+"   *   absolutized against DOC and tokenized \u2014 there is no prefix to",
+"   *   re-attach inside a token document.",
+"   */",
+"  function mapUrl(u) {",
+"    /* v5 sandbox wrapper: every mapped worker path becomes ABSOLUTE",
+"     * (https://worker/__t/\u2026) because about:srcdoc has no base to",
+"     * resolve \"/__t/\u2026\" against \u2014 DOM attributes, CSS url() text, fetch",
+"     * URLs and nav postMessages all need the absolute form. absW() is",
+"     * idempotent, and in non-sandbox mode it is a no-op. */",
+"    return absW(mapUrl0(u));",
+"  }",
+"",
+"  function mapUrl0(u) {",
+"    try {",
+"      if (u == null) return u;",
+"      if (typeof u === 'object' &amp;&amp; u instanceof URL) {",
+"        var s0 = mapUrl(u.href);",
+"        return s0;",
+"      }",
+"      if (typeof u !== 'string') return u;",
+"      var str = u.trim();",
+"      if (!str) return str;",
+"      if (/^(data|blob|about|javascript|mailto|tel|sms|intent|ms-|chrome|file|ws|wss):/i.test(str)) {",
+"        // wss/ws handled by the WebSocket wrapper below; here pass through",
+"        return str;",
+"      }",
+"      if (str.charAt(0) === '#') return str;",
+"      var m;",
+"      if ((m = str.match(/^https?:\\/\\/([^\\/?#]+)/i))) {",
+"        var host = m[1].toLowerCase();",
+"        var org = originStr();",
+"        if (org &amp;&amp; (str === org || str.indexOf(org + '/') === 0)) {",
+"          // same-origin (worker) absolute URL \u2014 either already proxied",
+"          // (\"/\u2026\", \"/p/host/\u2026\", \"/__t/\u2026\") or a bare worker-root path that",
+"          // still belongs to this document's upstream",
+"          var sp = str.slice(org.length) || '/';",
+"          if (isProxyPath(sp)) return sp;",
+"          return PFX + sp;",
+"        }",
+"        if (!allowedHost(host)) return str;                    // external: leave (usually analytics)",
+"        if (host === HOST &amp;&amp; !TOK) {",
+"          var rest = str.slice(m[0].length) || '/';",
+"          return PFX + rest;                                    // chat host: bare worker path",
+"        }",
+"        var t1 = tokPath(str);                                 // everything else: opaque token",
+"        if (t1) return t1;",
+"        return '/p/' + host + (str.slice(m[0].length) || '/'); // keyless legacy fallback",
+"      }",
+"      if ((m = str.match(/^\\/\\/([^\\/?#]+)/))) {",
+"        var h2 = m[1].toLowerCase();",
+"        if (!allowedHost(h2)) return str;",
+"        if (h2 === HOST &amp;&amp; !TOK) {",
+"          var rest2 = str.slice(m[0].length) || '/';",
+"          return PFX + rest2;",
+"        }",
+"        var t2 = tokPath('https:' + str);",
+"        if (t2) return t2;",
+"        return '/p/' + h2 + (str.slice(m[0].length) || '/');",
+"      }",
+"      if (str.charAt(0) === '/' &amp;&amp; str.charAt(1) !== '/') {",
+"        /* v5 order fix: in TOK mode there IS no prefix to carry \u2014 a",
+"         * root-absolute path belongs to the DOC's upstream and MUST be",
+"         * absolutized + tokenized. But the EXPLICIT already-proxied",
+"         * forms (a token path the worker rewrote into an attr, a legacy",
+"         * /p/&lt;host&gt;/ path, a worker meta route) pass through untouched \u2014",
+"         * hasPfx() alone would swallow EVERYTHING when PFX is ''. */",
+"        if (TOK &amp;&amp; DOC) {",
+"          if (/^\\/__(t|o)\\//.test(str)) return str;",
+"          if (isCrossHostPath(str)) return str;",
+"          if (/^\\/__(status|clear|diag)([\\/?#]|$)/.test(str)) return str;",
+"          try {",
+"            var t3 = tokPath(new URL(str, DOC).href);",
+"            if (t3) return t3;",
+"          } catch (e3) { /* fall through */ }",
+"        }",
+"        if (hasPfx(str)) return str;          // already carries this doc's proxy prefix",
+"        if (isCrossHostPath(str)) return str; // already a legacy /p/&lt;host&gt;/ proxy path",
+"        if (/^\\/__(t|o)\\//.test(str)) return str; // already a token path (v4 /__t/ or v6 /__o/)",
+"        return PFX + str;",
+"      }",
+"      if (TOK &amp;&amp; DOC &amp;&amp; !/^[a-z][a-z0-9+.-]*:/i.test(str)) {",
+"        try {",
+"          var t4 = tokPath(new URL(str, DOC).href);",
+"          if (t4) return t4;",
+"        } catch (e4) { /* fall through */ }",
+"      }",
+"      return str; // relative \u2192 resolves against the proxied document URL",
+"    } catch (e) { return u; }",
+"  }",
+"",
+"  /* ---------- cookies ---------- */",
+"  function docCookies() {",
+"    var out = [];",
+"    if (SD) {",
+"      /* v5 sandbox: document.cookie is shimmed to the memory jar below \u2014",
+"       * reads come from the jar (seeded from window.name at boot and",
+"       * refreshed by x-set-cookie on every proxied response). */",
+"      jar.forEach(function (c) { if (c &amp;&amp; c.name &amp;&amp; !c.del) out.push(c.name + '=' + c.value); });",
+"      return out;",
+"    }",
+"    try {",
+"      (document.cookie || '').split(';').forEach(function (kv) {",
+"        kv = kv.trim();",
+"        if (kv) out.push(kv);",
+"      });",
+"    } catch (e) { /* ignore */ }",
+"    return out;",
+"  }",
+"",
+"  function cookieHeader() {",
+"    var seen = {};",
+"    var parts = [];",
+"    docCookies().forEach(function (kv) {",
+"      var name = kv.split('=')[0];",
+"      if (!seen[name]) { seen[name] = 1; parts.push(kv); }",
+"    });",
+"    jar.forEach(function (c) {",
+"      if (c &amp;&amp; c.name &amp;&amp; !seen[c.name]) { seen[c.name] = 1; parts.push(c.name + '=' + c.value); }",
+"    });",
+"    return parts.join('; ');",
+"  }",
+"",
+"  function ingestSetCookie(hdrVal) {",
+"    try {",
+"      if (!hdrVal) return;",
+"      var arr = JSON.parse(decodeURIComponent(hdrVal));",
+"      if (!Array.isArray(arr)) return;",
+"      var map = {};",
+"      jar.forEach(function (c) { map[c.name] = c; });",
+"      arr.forEach(function (raw) {",
+"        var bits = String(raw).split(';');",
+"        var nv = bits[0];",
+"        var eq = nv.indexOf('=');",
+"        if (eq &lt; 1) return;",
+"        var c = { name: nv.slice(0, eq).trim(), value: nv.slice(eq + 1).trim() };",
+"        for (var i = 1; i &lt; bits.length; i++) {",
+"          var b = bits[i].trim();",
+"          var k = b.split('=')[0].toLowerCase();",
+"          if (k === 'max-age') {",
+"            var ma = parseInt(b.slice(8), 10);",
+"            if (ma === 0) { c.del = true; }",
+"            c.maxAge = ma;",
+"          }",
+"        }",
+"        if (c.del) delete map[c.name];",
+"        else map[c.name] = c;",
+"      });",
+"      jar = [];",
+"      Object.keys(map).forEach(function (k) { jar.push(map[k]); });",
+"      up({ type: 'cookies', cookies: jar });",
+"    } catch (e) { /* ignore */ }",
+"  }",
+"",
+"  function seedDocumentCookies() {",
+"    if (SD) return; /* v5 sandbox: cookies live in the memory jar only */",
+"    jar.forEach(function (c) {",
+"      try {",
+"        document.cookie = c.name + '=' + c.value + '; path=/; Max-Age=31536000; Secure; SameSite=None; Partitioned';",
+"      } catch (e) { /* ignore */ }",
+"    });",
+"  }",
+"",
+"  /* ---------- v5: document.cookie shim (sandbox mode) -----------------",
+"   * In a null-origin srcdoc frame real cookie writes go nowhere (and",
+"   * reads can throw on some engines). The instance property is",
+"   * shadowed with an in-memory jar view: reads join the jar, writes",
+"   * merge into it and are echoed to the shell so the session survives",
+"   * the next srcdoc swap. Cookie-header replay to the worker rides on",
+"   * the x-cookie header the wrappers already set. */",
+"  try {",
+"    if (SD) {",
+"      var _cookieDesc = Object.getOwnPropertyDescriptor(Document.prototype, 'cookie');",
+"      Object.defineProperty(document, 'cookie', {",
+"        get: function () { return docCookies().join('; '); },",
+"        set: function (str) {",
+"          try {",
+"            var bits = String(str).split(';');",
+"            var nv = bits[0];",
+"            var eq = nv.indexOf('=');",
+"            if (eq &gt;= 0) {",
+"              var name = nv.slice(0, eq).trim();",
+"              var value = nv.slice(eq + 1).trim();",
+"              var del = false;",
+"              for (var i = 1; i &lt; bits.length; i++) {",
+"                var b = bits[i].trim().toLowerCase();",
+"                if (b === 'max-age=0' || b.indexOf('expires=thu, 01 jan 1970') === 0) del = true;",
+"              }",
+"              if (name) {",
+"                var found = false;",
+"                for (var j = 0; j &lt; jar.length; j++) {",
+"                  if (jar[j].name === name) { found = true; if (del) { jar.splice(j, 1); } else { jar[j].value = value; } break; }",
+"                }",
+"                if (!found &amp;&amp; !del) jar.push({ name: name, value: value });",
+"                up({ type: 'cookies', cookies: jar });",
+"              }",
+"            }",
+"          } catch (eC) { /* ignore */ }",
+"        },",
+"        configurable: true",
+"      });",
+"    }",
+"  } catch (eCookieShim) { /* ignore */ }",
+"",
+"  /* ---------- header injection ---------- */",
+"  function applyHeaders(h) {",
+"    try {",
+"      var ch = cookieHeader();",
+"      if (ch &amp;&amp; !h.has('x-cookie')) h.set('x-cookie', ch);",
+"      if (TOKEN &amp;&amp; !h.has('x-proxy-token')) h.set('x-proxy-token', TOKEN);",
+"    } catch (e) { /* ignore */ }",
+"    return h;",
+"  }",
+"",
+"  /* ---------- fetch ---------- */",
+"  var _fetch = window.fetch ? window.fetch.bind(window) : null;",
+"  if (_fetch) {",
+"    window.fetch = function (input, init) {",
+"      try {",
+"        if (input &amp;&amp; typeof input === 'object' &amp;&amp; typeof input.url === 'string' &amp;&amp; input.constructor &amp;&amp; input.constructor.name === 'Request') {",
+"          var mapped = mapUrl(input.url);",
+"          if (mapped !== input.url) {",
+"            try { input = new Request(absW(mapped), input); } catch (e2) { /* keep original */ }",
+"          }",
+"        } else if (typeof input === 'string' || input instanceof URL) {",
+"          var u2 = mapUrl(String(input));",
+"          if (u2 !== String(input)) input = absW(u2);",
+"        }",
+"        init = init || {};",
+"        var H;",
+"        try { H = (init.headers instanceof Headers) ? init.headers : new Headers(init.headers || {}); }",
+"        catch (e3) { H = new Headers(); }",
+"        init.headers = applyHeaders(H);",
+"        var p = _fetch(input, init);",
+"        p.then(function (r) {",
+"          try { ingestSetCookie(r.headers &amp;&amp; r.headers.get('x-set-cookie')); } catch (e4) { /* ignore */ }",
+"        }, function () { /* network error \u2014 swallow */ });",
+"        return p;",
+"      } catch (e) {",
+"        return _fetch(input, init);",
+"      }",
+"    };",
+"  }",
+"",
+"  /* ---------- XMLHttpRequest ---------- */",
+"  try {",
+"    var _open = XMLHttpRequest.prototype.open;",
+"    XMLHttpRequest.prototype.open = function (method, url) {",
+"      try {",
+"        var mu = mapUrl(String(url));",
+"        if (mu !== String(url)) {",
+"          mu = absW(mu);",
+"          if (arguments.length &gt; 2) {",
+"            arguments[1] = mu;",
+"            return _open.apply(this, arguments);",
+"          }",
+"          return _open.call(this, method, mu);",
+"        }",
+"      } catch (e) { /* ignore */ }",
+"      return _open.apply(this, arguments);",
+"    };",
+"    var _send = XMLHttpRequest.prototype.send;",
+"    XMLHttpRequest.prototype.send = function () {",
+"      try {",
+"        var ch = cookieHeader();",
+"        if (ch) this.setRequestHeader('x-cookie', ch);",
+"        if (TOKEN) this.setRequestHeader('x-proxy-token', TOKEN);",
+"      } catch (e) { /* ignore */ }",
+"      var xhr = this;",
+"      try {",
+"        xhr.addEventListener('loadend', function () {",
+"          try { ingestSetCookie(xhr.getResponseHeader &amp;&amp; xhr.getResponseHeader('x-set-cookie')); } catch (e2) { /* ignore */ }",
+"        });",
+"      } catch (e3) { /* ignore */ }",
+"      return _send.apply(this, arguments);",
+"    };",
+"  } catch (e) { /* ignore */ }",
+"",
+"  /* ---------- EventSource ---------- */",
+"  try {",
+"    if (window.EventSource) {",
+"      var _ES = window.EventSource;",
+"      window.EventSource = function (url, cfg) {",
+"        try {",
+"          var mu = absW(mapUrl(String(url)));",
+"          /* EventSource cannot set headers \u2014 carry the token in the query */",
+"          if (TOKEN &amp;&amp; mu !== String(url) &amp;&amp; String(mu).indexOf('__t=') &lt; 0) {",
+"            mu += (mu.indexOf('?') &lt; 0 ? '?' : '&amp;') + '__t=' + encodeURIComponent(TOKEN);",
+"          }",
+"          url = mu;",
+"        } catch (e) { /* ignore */ }",
+"        return new _ES(url, cfg);",
+"      };",
+"      window.EventSource.prototype = _ES.prototype;",
+"    }",
+"  } catch (e) { /* ignore */ }",
+"",
+"  /* ---------- WebSocket ---------- */",
+"  try {",
+"    if (window.WebSocket) {",
+"      var _WS = window.WebSocket;",
+"      window.WebSocket = function (url, protocols) {",
+"        try {",
+"          var s = String(url);",
+"          var m = s.match(/^(wss?):\\/\\/([^\\/?#]+)(\\/.*)?$/i);",
+"          if (m) {",
+"            var host = m[2].toLowerCase();",
+"            var scheme = m[1].toLowerCase() === 'ws' ? 'ws' : 'wss';",
+"            if (allowedHost(host)) {",
+"              var rest = m[3] || '/';",
+"              var path;",
+"              if (host === HOST &amp;&amp; !TOK) {",
+"                path = PFX + rest; // chat host: the worker root IS the ws endpoint",
+"              } else {",
+"                var wtok = encTok(s); // the whole original ws:// URL in one opaque token",
+"                path = wtok ? '/__t/' + wtok : '/p/' + host + rest; // keyless legacy fallback",
+"              }",
+"              if (TOKEN &amp;&amp; path.indexOf('__t=') &lt; 0) {",
+"                path += (path.indexOf('?') &lt; 0 ? '?' : '&amp;') + '__t=' + encodeURIComponent(TOKEN);",
+"              }",
+"              /* v5 sandbox: location.host is EMPTY at about:srcdoc \u2014 the",
+"               * worker origin comes from cfg instead. */",
+"              var wOrigin = (SD &amp;&amp; WORKER) ? WORKER : (location.protocol + '//' + location.host);",
+"              url = (wOrigin.indexOf('https:') === 0 ? 'wss' : scheme) + '://' + wOrigin.replace(/^https?:\\/\\//i, '') + path;",
+"            }",
+"          }",
+"        } catch (e) { /* ignore */ }",
+"        return protocols === undefined ? new _WS(url) : new _WS(url, protocols);",
+"      };",
+"      window.WebSocket.prototype = _WS.prototype;",
+"      window.WebSocket.CONNECTING = _WS.CONNECTING;",
+"      window.WebSocket.OPEN = _WS.OPEN;",
+"      window.WebSocket.CLOSING = _WS.CLOSING;",
+"      window.WebSocket.CLOSED = _WS.CLOSED;",
+"    }",
+"  } catch (e) { /* ignore */ }",
+"",
+"  /* ---------- sendBeacon ---------- */",
+"  try {",
+"    if (navigator.sendBeacon) {",
+"      var _sb = navigator.sendBeacon.bind(navigator);",
+"      navigator.sendBeacon = function (url, data) {",
+"        try {",
+"          var mu = absW(mapUrl(String(url)));",
+"          if (mu !== String(url)) {",
+"            // beacons cannot carry custom headers; fall back to keepalive fetch",
+"            return _fetch(mu, { method: 'POST', body: data, keepalive: true, mode: 'no-cors' }) ? true : true;",
+"          }",
+"        } catch (e) { /* ignore */ }",
+"        return _sb(url, data);",
+"      };",
+"    }",
+"  } catch (e) { /* ignore */ }",
+"",
+"  /* ---------- navigation reporting ---------- */",
+"  function curUrl() {",
+"    if (SD) return DOC || 'about:srcdoc'; /* v5: the shell wants the real upstream URL */",
+"    return location.pathname + location.search + location.hash;",
+"  }",
+"  function reportNav() { up({ type: 'nav', url: curUrl(), title: document.title || '' }); }",
+"",
+"  try {",
+"    var _push = history.pushState;",
+"    var _replace = history.replaceState;",
+"    // SPA history entries must stay inside the proxy prefix: a bare",
+"    // \"/login\" pushed from \"/chat/\" would escape the sandbox on the next",
+"    // reload, and a cross-origin URL would throw SecurityError outright.",
+"    function fixHistUrl(u) {",
+"      try {",
+"        var s = String(u);",
+"        if (!s || s.charAt(0) === '#') return s;",
+"        var org = originStr();",
+"        if (org &amp;&amp; (s === org || s.indexOf(org + '/') === 0)) {",
+"          var p = s.slice(org.length) || '/';",
+"          if (isProxyPath(p)) return p;",
+"          return PFX + p;",
+"        }",
+"        var mapped = mapUrl(s);",
+"        if (/^(https?:)?\\/\\//i.test(mapped)) return curUrl(); // cross-origin \u2192 would throw",
+"        return mapped;",
+"      } catch (e) { return u; }",
+"    }",
+"    history.pushState = function () {",
+"      if (SD) {",
+"        /* v5 sandbox: native pushState throws SecurityError (the URL is",
+"         * cross-origin to about:srcdoc) and would kill the SPA. Treat it",
+"         * as a SOFT transition: tell the shell the new URL (worker path +",
+"         * upstream URL) \u2014 it updates its history entry and address bar;",
+"         * the app renders the transition client-side exactly as built.",
+"         * v6: ALSO advance the fake location \u2014 routers re-read",
+"         * window.location.pathname to re-resolve routes after SPA",
+"         * transitions; a frozen fake made every soft transition land",
+"         * back on the boot route (the /auth-renders-home bug). */",
+"        try {",
+"          var su = (arguments.length &gt; 2 &amp;&amp; arguments[2] != null) ? String(arguments[2]) : '';",
+"          if (su &amp;&amp; su.charAt(0) !== '#') {",
+"            var sAbs = '';",
+"            try { sAbs = new URL(su, LOC.u || DOC || 'about:srcdoc').href; } catch (eA) { sAbs = su; }",
+"            setLoc(sAbs);",
+"            up({ type: 'hist', url: mapUrl(sAbs), up: sAbs });",
+"          } else if (su &amp;&amp; su.charAt(0) === '#') {",
+"            /* hash-only push: the path stays, the hash moves */",
+"            try { setLoc(String(LOC.u ? LOC.u.href : (DOC || '/')).replace(/#.*$/, '') + su); } catch (eHh) { /* ignore */ }",
+"          }",
+"        } catch (eH) { /* ignore */ }",
+"        reportNav();",
+"        return undefined;",
+"      }",
+"      try { if (arguments.length &gt; 2 &amp;&amp; arguments[2] != null) arguments[2] = fixHistUrl(arguments[2]); } catch (e2) { /* ignore */ }",
+"      var r = _push.apply(this, arguments); reportNav(); return r;",
+"    };",
+"    history.replaceState = function () {",
+"      if (SD) {",
+"        try {",
+"          var ru = (arguments.length &gt; 2 &amp;&amp; arguments[2] != null) ? String(arguments[2]) : '';",
+"          if (ru &amp;&amp; ru.charAt(0) !== '#') {",
+"            var rAbs = '';",
+"            try { rAbs = new URL(ru, LOC.u || DOC || 'about:srcdoc').href; } catch (eB) { rAbs = ru; }",
+"            setLoc(rAbs);",
+"            up({ type: 'hist', url: mapUrl(rAbs), up: rAbs, replace: true });",
+"          } else if (ru &amp;&amp; ru.charAt(0) === '#') {",
+"            try { setLoc(String(LOC.u ? LOC.u.href : (DOC || '/')).replace(/#.*$/, '') + ru); } catch (eRh) { /* ignore */ }",
+"          }",
+"        } catch (eH2) { /* ignore */ }",
+"        reportNav();",
+"        return undefined;",
+"      }",
+"      try { if (arguments.length &gt; 2 &amp;&amp; arguments[2] != null) arguments[2] = fixHistUrl(arguments[2]); } catch (e2) { /* ignore */ }",
+"      var r = _replace.apply(this, arguments); reportNav(); return r;",
+"    };",
+"    window.addEventListener('popstate', reportNav);",
+"    window.addEventListener('hashchange', reportNav);",
+"    window.addEventListener('pageshow', reportNav);",
+"  } catch (e) { /* ignore */ }",
+"",
+"  /* ---------- Navigation API interception (Chrome/Edge) ----------",
+"   * catches location.href=..., form submits, link clicks \u2014 anything",
+"   * that would navigate this frame to an absolute or external URL.",
+"   * v5 sandbox: EVERY navigation is intercepted \u2014 the frame must never",
+"   * go anywhere; the shell re-renders a fresh srcdoc instead.",
+"   */",
+"  try {",
+"    if (window.navigation &amp;&amp; window.navigation.addEventListener) {",
+"      window.navigation.addEventListener('navigate', function (e) {",
+"        try {",
+"          if (!e.canIntercept || !e.destination || e.destination.sameDocument) return;",
+"          var dest = String(e.destination.url || '');",
+"          if (!dest) return;",
+"          if (SD) {",
+"            e.preventDefault();",
+"            if (isWorkerUrl(dest)) { nav(dest); return; } /* already proxied */",
+"            if (/^https?:\\/\\//i.test(dest) &amp;&amp; !allowedHost((dest.match(/^https?:\\/\\/([^\\/?#]+)/i) || [])[1])) {",
+"              up({ type: 'ext', url: dest });",
+"              pageToast('Blocked (outside the proxy): ' + dest);",
+"              return;",
+"            }",
+"            nav(dest);",
+"            return;",
+"          }",
+"          var org = originStr();",
+"          if (org &amp;&amp; (dest === org || dest.indexOf(org + '/') === 0)) {",
+"            // same-origin destination on the worker itself: either an",
+"            // already-proxied path (proceed natively \u2014 the old code used to",
+"            // eat these as \"external\") or a bare worker-root path that must",
+"            // regain this document's proxy prefix",
+"            var p = dest.slice(org.length) || '/';",
+"            if (isProxyPath(p)) return;",
+"            e.preventDefault();",
+"            location.href = PFX + p;",
+"            return;",
+"          }",
+"          var mapped = mapUrl(dest);",
+"          if (mapped !== dest) {",
+"            // z.ai-family absolute URL \u2192 swap for the proxied path",
+"            e.preventDefault();",
+"            location.href = mapped;",
+"            return;",
+"          }",
+"          if (/^https?:\\/\\//i.test(dest) || /^\\/\\//.test(dest)) {",
+"            // external site \u2014 the phone will block it anyway; tell the user",
+"            e.preventDefault();",
+"            up({ type: 'ext', url: dest });",
+"            pageToast('Blocked (outside the proxy): ' + dest);",
+"          }",
+"          // relative destinations proceed natively",
+"        } catch (err) { /* ignore */ }",
+"      });",
+"    }",
+"  } catch (e) { /* ignore */ }",
+"",
+"  /* ---------- window.open ---------- */",
+"  function stubWindow() {",
+"    return {",
+"      closed: false,",
+"      close: function () { this.closed = true; },",
+"      focus: function () {}, blur: function () {},",
+"      postMessage: function () {},",
+"      location: { href: 'about:blank', replace: function () {}, assign: function () {} },",
+"      document: { write: function () {}, open: function () {}, close: function () {}, createElement: function () { return { setAttribute: function () {}, appendChild: function () {} }; } }",
+"    };",
+"  }",
+"  window.open = function (url) {",
+"    try {",
+"      var u = url == null ? '' : String(url);",
+"      if (!u || u === 'about:blank') return stubWindow();",
+"      if (SD) {",
+"        /* v5 sandbox: no popups from the sandbox \u2014 in-app navigation or",
+"         * the external notice, never a real window (its first navigation",
+"         * would hit the org filter). */",
+"        if (isWorkerUrl(u)) { nav(u); return stubWindow(); }",
+"        if (/^https?:\\/\\//i.test(u) &amp;&amp; !allowedHost((u.match(/^https?:\\/\\/([^\\/?#]+)/i) || [])[1])) {",
+"          up({ type: 'ext', url: u });",
+"          pageToast('Blocked (outside the proxy): ' + u);",
+"          return stubWindow();",
+"        }",
+"        nav(u);",
+"        return stubWindow();",
+"      }",
+"      var mapped = mapUrl(u);",
+"      if (mapped !== u) { location.href = mapped; return stubWindow(); }",
+"      if (/^(https?:)?\\/\\//i.test(u)) { up({ type: 'ext', url: u }); pageToast('Blocked (outside the proxy): ' + u); return stubWindow(); }",
+"      location.href = u;",
+"      return stubWindow();",
+"    } catch (e) { return stubWindow(); }",
+"  };",
+"",
+"  /* ---------- click / submit capture (fallback layer) ---------- */",
+"  document.addEventListener('click', function (e) {",
+"    try {",
+"      if (e.defaultPrevented || (e.button !== undefined &amp;&amp; e.button !== 0)) return;",
+"      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;",
+"      var el = e.target;",
+"      var a = el &amp;&amp; el.closest ? el.closest('a[' + 'href]') : null;",
+"      if (!a) return;",
+"      var href = a.getAttribute('href') || '';",
+"      if (!href || href.charAt(0) === '#' || /^(data|blob|javascript|mailto|tel):/i.test(href)) return;",
+"      var target = (a.target || '').toLowerCase();",
+"      if (SD) {",
+"        /* v5 sandbox: NOTHING navigates \u2014 every link becomes a nav()",
+"         * postMessage and the shell re-renders a fresh srcdoc. */",
+"        e.preventDefault();",
+"        if (isWorkerUrl(href)) { nav(href); return; } /* worker-rewritten attr */",
+"        if (/^https?:\\/\\//i.test(href) &amp;&amp; !allowedHost((href.match(/^https?:\\/\\/([^\\/?#]+)/i) || [])[1])) {",
+"          up({ type: 'ext', url: href });",
+"          pageToast('Blocked (outside the proxy): ' + href);",
+"          return;",
+"        }",
+"        nav(href);",
+"        return;",
+"      }",
+"      var mapped = mapUrl(href);",
+"      if (mapped !== href) {",
+"        if (target === '_top' || target === '_parent' || target === '_blank') {",
+"          e.preventDefault();",
+"          location.href = mapped;",
+"        } else {",
+"          a.setAttribute('href', mapped); // let native navigation use the proxied href",
+"        }",
+"        return;",
+"      }",
+"      if (/^(https?:)?\\/\\//i.test(href)) {",
+"        e.preventDefault();",
+"        up({ type: 'ext', url: href });",
+"        pageToast('Blocked (outside the proxy): ' + href);",
+"        return;",
+"      }",
+"      if (target === '_top' || target === '_parent') {",
+"        e.preventDefault();",
+"        location.href = href;",
+"      }",
+"    } catch (err) { /* ignore */ }",
+"  }, true);",
+"",
+"  /* ---------- v5: form serialization (sandbox submits) -----------------",
+"   * A form submit must become a POST navigation the SHELL performs via",
+"   * fetch(): method + enctype + all successful controls. Multipart",
+"   * forms ship the FormData object itself (postMessage structured-clones",
+"   * it); urlencoded forms ship a plain string. */",
+"  function serializeForm(f) {",
+"    var enctype = (f.getAttribute('enctype') || 'application/x-www-form-urlencoded').toLowerCase();",
+"    var method = (f.getAttribute('method') || 'GET').toUpperCase();",
+"    if (enctype.indexOf('multipart') &gt;= 0) {",
+"      try {",
+"        var fd = new FormData(f);",
+"        return { method: method === 'GET' ? 'POST' : method, body: fd, ct: null };",
+"      } catch (eFD) { /* fall through to urlencoded */ }",
+"    }",
+"    var parts = [];",
+"    try {",
+"      var els = f.elements;",
+"      for (var i = 0; i &lt; els.length; i++) {",
+"        var fe = els[i];",
+"        if (!fe.name || fe.disabled) continue;",
+"        var ft = (fe.type || '').toLowerCase();",
+"        if (ft === 'checkbox' || ft === 'radio') { if (fe.checked) parts.push([fe.name, fe.value || '']); continue; }",
+"        if (ft === 'file') {",
+"          try {",
+"            if (fe.files &amp;&amp; fe.files[0]) parts.push([fe.name, fe.files[0].name]);",
+"          } catch (eF) { /* ignore */ }",
+"          continue;",
+"        }",
+"        if (ft === 'submit' || ft === 'button' || ft === 'image' || ft === 'reset') continue;",
+"        if (fe.tagName === 'SELECT') {",
+"          var opts = fe.selectedOptions || [];",
+"          for (var oi = 0; oi &lt; opts.length; oi++) parts.push([fe.name, opts[oi].value || '']);",
+"          continue;",
+"        }",
+"        parts.push([fe.name, fe.value || '']);",
+"      }",
+"    } catch (eE) { /* ignore */ }",
+"    /* the submit button that fired (name+value) is not in elements' values */",
+"    try {",
+"      if (f.__zpSubBtn &amp;&amp; f.__zpSubBtn.name) parts.push([f.__zpSubBtn.name, f.__zpSubBtn.value || '']);",
+"    } catch (eS) { /* ignore */ }",
+"    var qs = parts.map(function (p) { return encodeURIComponent(p[0]) + '=' + encodeURIComponent(p[1] || ''); }).join('&amp;');",
+"    var ct = enctype.indexOf('text/plain') &gt;= 0 ? 'text/plain' : 'application/x-www-form-urlencoded';",
+"    return { method: method, body: qs, ct: ct };",
+"  }",
+"  try {",
+"    if (SD) {",
+"      /* remember the submit button that fired (its name/value is part of",
+"       * the successful controls set per HTML spec) */",
+"      document.addEventListener('click', function (e) {",
+"        try {",
+"          var b = e.target &amp;&amp; e.target.closest ? e.target.closest('button, input[type=submit], input[type=image]') : null;",
+"          if (b &amp;&amp; b.form) b.form.__zpSubBtn = b;",
+"        } catch (eB) { /* ignore */ }",
+"      }, true);",
+"      document.addEventListener('submit', function (e) {",
+"        try {",
+"          var f = e.target;",
+"          if (!f || !f.getAttribute) return;",
+"          /* ALWAYS preventDefault: a native submission would navigate",
+"           * the sandbox frame (straight into the org filter). */",
+"          e.preventDefault();",
+"          var action = f.getAttribute('action') || '';",
+"          /* v6: SPA-managed forms (NO action attribute \u2014 the app's own",
+"           * onsubmit handler owns the submit: captcha flows, fetch-based",
+"           * logins, search boxes) must be LEFT ALONE. v5 serialized EVERY",
+"           * form into a GET/POST navigation \u2014 which hijacked the z.ai",
+"           * login form (email+password folded into the URL as a QUERY",
+"           * STRING!), swapped the document, and killed the app's own",
+"           * captcha\u2192signin chain: the \"sign-in buttons do nothing\"",
+"           * symptom. Only forms that actually target a server endpoint",
+"           * (a real action) become shell navigations. */",
+"          if (!action || action === '#' || action.charAt(0) === '#' || /^javascript:/i.test(action)) return;",
+"          var dest = action;",
+"          if (isWorkerUrl(dest)) {",
+"            /* the action was already rewritten to the worker origin \u2014",
+"             * navigate straight to it (the shell strips the origin) */",
+"            var serW = serializeForm(f);",
+"            if ((serW.method || 'GET') === 'GET') {",
+"              var baseW = dest.split('#')[0].split('?')[0];",
+"              nav(baseW + (serW.body ? '?' + serW.body : ''));",
+"            } else {",
+"              nav(dest, serW.method, serW.body, serW.ct);",
+"            }",
+"            return;",
+"          }",
+"          if (/^https?:\\/\\//i.test(dest) &amp;&amp; !allowedHost((dest.match(/^https?:\\/\\/([^\\/?#]+)/i) || [])[1])) {",
+"            up({ type: 'ext', url: dest });",
+"            return;",
+"          }",
+"          var ser = serializeForm(f);",
+"          if ((ser.method || 'GET') === 'GET') {",
+"            /* GET forms: the body becomes the destination query */",
+"            var base = dest.split('#')[0].split('?')[0];",
+"            dest = base + (ser.body ? '?' + ser.body : '');",
+"            nav(dest);",
+"          } else {",
+"            nav(dest, ser.method, ser.body, ser.ct);",
+"          }",
+"        } catch (errS) { /* ignore */ }",
+"      }, true);",
+"    }",
+"  } catch (eSubArm) { /* ignore */ }",
+"",
+"  document.addEventListener('submit', function (e) {",
+"    try {",
+"      if (SD) return; /* handled by the sandbox submit arm above */",
+"      var f = e.target;",
+"      if (!f || !f.getAttribute) return;",
+"      var action = f.getAttribute('action') || '';",
+"      if (action) {",
+"        var mapped = mapUrl(action);",
+"        if (mapped !== action) f.setAttribute('action', mapped);",
+"      }",
+"      var target = (f.target || '').toLowerCase();",
+"      if (target === '_top' || target === '_parent' || target === '_blank') {",
+"        e.preventDefault();",
+"        var dest = f.getAttribute('action') || curUrl();",
+"        if (/^(https?:)?\\/\\//i.test(dest) &amp;&amp; mapUrl(dest) === dest) { up({ type: 'ext', url: dest }); return; }",
+"        location.href = dest;",
+"      }",
+"    } catch (err) { /* ignore */ }",
+"  }, true);",
+"",
+"  /* ---------- service worker: never register ----------",
+"   * a SW would bypass every patch we installed. In the sandbox the",
+"   * navigator.serviceWorker PROPERTY itself throws SecurityError on",
+"   * access (opaque origin) \u2014 so the whole getter is stubbed first.",
+"   */",
+"  try {",
+"    var SW_STUB = {",
+"      register: function () { return Promise.resolve({ scope: '/', active: null, installing: null, waiting: null, unregister: function () { return Promise.resolve(true); }, addEventListener: function () {}, state: 'activated' }); },",
+"      getRegistration: function () { return Promise.resolve(undefined); },",
+"      getRegistrations: function () { return Promise.resolve([]); },",
+"      addEventListener: function () {},",
+"      removeEventListener: function () {},",
+"      ready: new Promise(function () {}),",
+"      controller: null",
+"    };",
+"    if (SD) {",
+"      try {",
+"        Object.defineProperty(Navigator.prototype, 'serviceWorker', { configurable: true, get: function () { return SW_STUB; } });",
+"      } catch (eSWP) {",
+"        try { Object.defineProperty(navigator, 'serviceWorker', { configurable: true, get: function () { return SW_STUB; } }); } catch (eSWI) { /* ignore */ }",
+"      }",
+"    } else if (navigator.serviceWorker &amp;&amp; navigator.serviceWorker.register) {",
+"      navigator.serviceWorker.register = SW_STUB.register;",
+"    }",
+"  } catch (e) { /* ignore */ }",
+"",
+"  /* ---------- dynamic subresource rewriting ----------",
+"   * The SPA builds absolute URLs at runtime for images, scripts,",
+"   * stylesheets and downloads (e.g. https://z-cdn.chatglm.cn/\u2026).",
+"   * Those would leave the proxy and die on a network that can only",
+"   * reach the worker. Rewrite them as they are inserted \u2014 hosts that",
+"   * are not allowlisted are left untouched (they fail quietly, like",
+"   * analytics does on the real site in China).",
+"   */",
+"  var RES_ATTRS = { IMG: ['src', 'srcset'], SCRIPT: ['src'], LINK: ['href'], SOURCE: ['src', 'srcset'], AUDIO: ['src', 'poster'], VIDEO: ['src', 'poster'], IFRAME: ['src'], OBJECT: ['data'], EMBED: ['src'], IMAGE: ['href'] };",
+"  function fixEl(el) {",
+"    try {",
+"      if (!el || !el.tagName || !el.getAttribute || !el.setAttribute) return;",
+"      var attrs = RES_ATTRS[el.tagName.toUpperCase()];",
+"      if (!attrs) return;",
+"      for (var i = 0; i &lt; attrs.length; i++) {",
+"        var a = attrs[i];",
+"        var v = el.getAttribute(a);",
+"        if (!v) continue;",
+"        var nv = mapUrl(v);",
+"        if (nv !== v) el.setAttribute(a, nv);",
+"      }",
+"    } catch (e) { /* ignore */ }",
+"  }",
+"  function scanTree(node) {",
+"    try {",
+"      if (!node || node.nodeType !== 1) return;",
+"      fixEl(node);",
+"      if (node.tagName &amp;&amp; node.tagName.toUpperCase() === 'STYLE') {",
+"        try {",
+"          var st = node.textContent;",
+"          if (st) {",
+"            var nst = mapCssUrls(st);",
+"            if (nst !== st) node.textContent = nst;",
+"          }",
+"        } catch (e2) { /* ignore */ }",
+"      }",
+"      if (node.querySelectorAll) {",
+"        var els = node.querySelectorAll('img,script,link,source,audio,video,iframe,object,embed,image,style');",
+"        for (var i = 0; i &lt; els.length; i++) {",
+"          fixEl(els[i]);",
+"          if (els[i].tagName &amp;&amp; els[i].tagName.toUpperCase() === 'STYLE') {",
+"            try {",
+"              var st2 = els[i].textContent;",
+"              if (st2) {",
+"                var nst2 = mapCssUrls(st2);",
+"                if (nst2 !== st2) els[i].textContent = nst2;",
+"              }",
+"            } catch (e3) { /* ignore */ }",
+"          }",
+"        }",
+"      }",
+"    } catch (e) { /* ignore */ }",
+"  }",
+"  try {",
+"    if (window.MutationObserver &amp;&amp; document.documentElement) {",
+"      var mo = new MutationObserver(function (muts) {",
+"        for (var i = 0; i &lt; muts.length; i++) {",
+"          var m = muts[i];",
+"          if (m.type === 'attributes') { fixEl(m.target); continue; }",
+"          if (m.type === 'characterData') {",
+"            /* text data changed inside a &lt;style&gt; (appendData/insertData) */",
+"            try {",
+"              var pn = m.target &amp;&amp; m.target.parentNode;",
+"              if (pn &amp;&amp; pn.tagName === 'STYLE') {",
+"                var ts2 = pn.textContent;",
+"                if (ts2) {",
+"                  var mts2 = mapCssUrls(ts2);",
+"                  if (mts2 !== ts2) pn.textContent = mts2;",
+"                }",
+"              }",
+"            } catch (e6) { /* ignore */ }",
+"            continue;",
+"          }",
+"          for (var j = 0; j &lt; m.addedNodes.length; j++) {",
+"            var an = m.addedNodes[j];",
+"            if (an.nodeType === 3 &amp;&amp; m.target &amp;&amp; m.target.tagName === 'STYLE') {",
+"              /* a raw text node was appended into a &lt;style&gt; */",
+"              try {",
+"                var ts = m.target.textContent;",
+"                if (ts) {",
+"                  var mts = mapCssUrls(ts);",
+"                  if (mts !== ts) m.target.textContent = mts;",
+"                }",
+"              } catch (e5) { /* ignore */ }",
+"            } else {",
+"              scanTree(an);",
+"            }",
+"          }",
+"        }",
+"      });",
+"      mo.observe(document.documentElement, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['src', 'href', 'srcset', 'poster', 'data'] });",
+"    }",
+"  } catch (e) { /* ignore */ }",
+"",
+"  /* Detached elements bypass the observer: telemetry beacons and preload",
+"   * probes set img.src (or setAttribute) without ever entering the DOM.",
+"   * Patch the property setter and setAttribute so those URLs are mapped",
+"   * onto the worker as well. */",
+"  try {",
+"    var imgProto = window.HTMLImageElement &amp;&amp; window.HTMLImageElement.prototype;",
+"    var srcDesc = imgProto &amp;&amp; Object.getOwnPropertyDescriptor(imgProto, 'src');",
+"    if (srcDesc &amp;&amp; srcDesc.set) {",
+"      Object.defineProperty(imgProto, 'src', {",
+"        get: function () { return srcDesc.get.call(this); },",
+"        set: function (v) {",
+"          try {",
+"            var mu = mapUrl(String(v));",
+"            if (mu !== String(v)) v = mu;",
+"          } catch (e) { /* ignore */ }",
+"          return srcDesc.set.call(this, v);",
+"        },",
+"        configurable: true,",
+"        enumerable: srcDesc.enumerable",
+"      });",
+"    }",
+"  } catch (e) { /* ignore */ }",
+"",
+"  try {",
+"    var _setattr = Element.prototype.setAttribute;",
+"    Element.prototype.setAttribute = function (name, value) {",
+"      try {",
+"        var n = String(name).toLowerCase();",
+"        if ((n === 'src' || n === 'href' || n === 'srcset' || n === 'poster' || n === 'data') &amp;&amp;",
+"            typeof value === 'string' &amp;&amp; this &amp;&amp; this.tagName) {",
+"          var attrs = RES_ATTRS[this.tagName.toUpperCase()];",
+"          if (attrs &amp;&amp; attrs.indexOf(n) &gt;= 0) {",
+"            var mu = mapUrl(value);",
+"            if (mu !== value) value = mu;",
+"          }",
+"        }",
+"      } catch (e) { /* ignore */ }",
+"      return _setattr.call(this, name, value);",
+"    };",
+"  } catch (e) { /* ignore */ }",
+"",
+"  /* ---------- v4: property-setter + CSSOM coverage (leak hardening) ----",
+"   * Frameworks assign .src/.href as PROPERTIES (bypassing setAttribute)",
+"   * and paint backgrounds through the CSSOM (bypassing the style",
+"   * attribute). Any allowlisted absolute URL slipping through those",
+"   * paths would leave the proxy carrying a readable hostname \u2014 exactly",
+"   * what organization filters block. Wrap the setters so mapUrl still",
+"   * catches them. */",
+"  function wrapProp(proto, prop, cssMode) {",
+"    try {",
+"      var d = Object.getOwnPropertyDescriptor(proto, prop);",
+"      if (!d || !d.set) return;",
+"      Object.defineProperty(proto, prop, {",
+"        get: d.get,",
+"        set: function (v) {",
+"          try {",
+"            if (typeof v === 'string') {",
+"              var nv = cssMode ? (v.indexOf('url(') &gt;= 0 ? mapCssUrls(v) : v) : mapUrl(v);",
+"              if (nv !== v) v = nv;",
+"            }",
+"          } catch (e) { /* ignore */ }",
+"          return d.set.call(this, v);",
+"        },",
+"        configurable: true,",
+"        enumerable: d.enumerable",
+"      });",
+"    } catch (e) { /* ignore */ }",
+"  }",
+"  try {",
+"    if (window.HTMLMediaElement) wrapProp(HTMLMediaElement.prototype, 'src');",
+"    if (window.HTMLScriptElement) wrapProp(HTMLScriptElement.prototype, 'src');",
+"    if (window.HTMLLinkElement) wrapProp(HTMLLinkElement.prototype, 'href');",
+"    if (window.HTMLIFrameElement) wrapProp(HTMLIFrameElement.prototype, 'src');",
+"  } catch (e) { /* ignore */ }",
+"",
+"  /* CSSOM writes: style.setProperty('background', 'url(https://\u2026)') and",
+"   * the background-family property setters must map their url()s too.",
+"   * v4.1: also maps @import \"\u2026\" strings and is reused for every CSS-TEXT",
+"   * injection channel (style textContent, insertRule, replaceSync) \u2014",
+"   * CSS fetched at runtime and re-injected as text would otherwise send",
+"   * the browser straight to the upstream host (the CSS engine does not",
+"   * go through the patched fetch). */",
+"  function mapCssUrls(val) {",
+"    try {",
+"      var s = String(val);",
+"      if (!/url\\(|@import/i.test(s)) return s;",
+"      s = s.replace(/url\\(\\s*(['\"]?)([^'\")]+)\\1\\s*\\)/gi, function (w, q, u) {",
+"        var nu = mapUrl(u);",
+"        return nu === u ? w : 'url(\"' + nu + '\")';",
+"      });",
+"      s = s.replace(/@import\\s*(['\"])([^'\"]+)\\1/gi, function (w, q, u) {",
+"        /* \\s* \u2014 minified css ships @import\"https://\u2026\" with no space */",
+"        var nu = mapUrl(u);",
+"        return nu === u ? w : '@import ' + q + nu + q;",
+"      });",
+"      return s;",
+"    } catch (e) { return val; }",
+"  }",
+"  try {",
+"    var _sp = CSSStyleDeclaration.prototype.setProperty;",
+"    if (_sp) {",
+"      CSSStyleDeclaration.prototype.setProperty = function (name, value, pri) {",
+"        try {",
+"          if (typeof value === 'string' &amp;&amp; value.indexOf('url(') &gt;= 0) value = mapCssUrls(value);",
+"        } catch (e) { /* ignore */ }",
+"        return _sp.call(this, name, value, pri);",
+"      };",
+"    }",
+"  } catch (e) { /* ignore */ }",
+"  try {",
+"    if (window.CSSStyleDeclaration) {",
+"      ['background', 'backgroundImage', 'content', 'maskImage', 'listStyleImage', 'borderImage'].forEach(function (prop) {",
+"        wrapProp(CSSStyleDeclaration.prototype, prop, true);",
+"      });",
+"    }",
+"  } catch (e) { /* ignore */ }",
+"",
+"  /* CSS TEXT injection channels \u2014 anything that hands raw CSS text to",
+"   * the CSS engine at runtime (the SPA fills the empty &lt;style nonce&gt; tag",
+"   * in the initial HTML this way, e.g. an @import for webfonts):",
+"   *   - styleEl.textContent = '\u2026'   (Node property setter)",
+"   *   - sheet.insertRule('\u2026')        (CSSOM)",
+"   *   - sheet.replaceSync('\u2026') / sheet.replace('\u2026') (constructable)",
+"   *   - &lt;style&gt; nodes arriving through the MutationObserver",
+"   * Every url()/@import inside that text is mapped (tokens for cross-host",
+"   * URLs) BEFORE the CSS engine ever sees it. */",
+"  try {",
+"    var _tcDesc = Object.getOwnPropertyDescriptor(Node.prototype, 'textContent');",
+"    if (_tcDesc &amp;&amp; _tcDesc.set) {",
+"      Object.defineProperty(Node.prototype, 'textContent', {",
+"        get: _tcDesc.get,",
+"        set: function (v) {",
+"          try {",
+"            if (this &amp;&amp; this.tagName === 'STYLE' &amp;&amp; typeof v === 'string') {",
+"              var nv = mapCssUrls(v);",
+"              if (nv !== v) v = nv;",
+"            }",
+"          } catch (e) { /* ignore */ }",
+"          return _tcDesc.set.call(this, v);",
+"        },",
+"        configurable: true,",
+"        enumerable: _tcDesc.enumerable",
+"      });",
+"    }",
+"  } catch (e) { /* ignore */ }",
+"  try {",
+"    if (window.CSSStyleSheet) {",
+"      var _ir = CSSStyleSheet.prototype.insertRule;",
+"      if (_ir) {",
+"        CSSStyleSheet.prototype.insertRule = function (rule, idx) {",
+"          try {",
+"            if (typeof rule === 'string') { var nr = mapCssUrls(rule); if (nr !== rule) rule = nr; }",
+"          } catch (e) { /* ignore */ }",
+"          return _ir.call(this, rule, idx);",
+"        };",
+"      }",
+"      var _rsync = CSSStyleSheet.prototype.replaceSync;",
+"      if (_rsync) {",
+"        CSSStyleSheet.prototype.replaceSync = function (txt) {",
+"          try { if (typeof txt === 'string') { var nt = mapCssUrls(txt); if (nt !== txt) txt = nt; } } catch (e) { /* ignore */ }",
+"          return _rsync.call(this, txt);",
+"        };",
+"      }",
+"      var _rpl = CSSStyleSheet.prototype.replace;",
+"      if (_rpl) {",
+"        CSSStyleSheet.prototype.replace = function (txt) {",
+"          try { if (typeof txt === 'string') { var nt2 = mapCssUrls(txt); if (nt2 !== txt) txt = nt2; } } catch (e) { /* ignore */ }",
+"          return _rpl.call(this, txt);",
+"        };",
+"      }",
+"    }",
+"  } catch (e) { /* ignore */ }",
+"",
+"  /* ---------- analytics shims (their hosts are blocked anyway) ---------- */",
+"  window.dataLayer = window.dataLayer || [];",
+"  window.gtag = window.gtag || function () { window.dataLayer.push(arguments); };",
+"",
+"  /* ---------- localStorage fallback for browsers that block it in iframes ----------",
+"   * backed by the shell through postMessage so sessions survive reloads.",
+"   * v5 sandbox note: in a null-origin frame ACCESSING window.localStorage",
+"   * THROWS SecurityError \u2014 the access must happen in its own try BEFORE",
+"   * the usable() probe, or the exception skips the shim entirely (the",
+"   * site's own `window.localStorage &amp;&amp; ...` guard would then throw and",
+"   * silently kill its boot logic). */",
+"  (function setupStorage() {",
+"    function usable(store) {",
+"      try {",
+"        var k = '__zai_probe__';",
+"        store.setItem(k, '1');",
+"        store.removeItem(k);",
+"        return true;",
+"      } catch (e) { return false; }",
+"    }",
+"    function makeShim(name) {",
+"      var mem = (name === 'localStorage') ? lsMirror : {};",
+"      return {",
+"        getItem: function (k) { return Object.prototype.hasOwnProperty.call(mem, k) ? mem[k] : null; },",
+"        setItem: function (k, v) { mem[k] = String(v); up({ type: 'ls', store: name, k: String(k), v: String(v) }); },",
+"        removeItem: function (k) { delete mem[k]; up({ type: 'ls', store: name, k: String(k), v: null }); },",
+"        clear: function () { mem = {}; up({ type: 'ls', store: name, k: '__clear__', v: null }); },",
+"        key: function (i) { return Object.keys(mem)[i] || null; }",
+"      };",
+"    }",
+"    ['localStorage', 'sessionStorage'].forEach(function (name) {",
+"      var native = null;",
+"      try { native = window[name]; } catch (eAcc) { native = null; }",
+"      if (native &amp;&amp; usable(native)) return; /* native storage works \u2014 keep it */",
+"      try {",
+"        Object.defineProperty(window, name, { value: makeShim(name), configurable: true, writable: false });",
+"      } catch (eDef) { /* ignore */ }",
+"    });",
+"  })();",
+"",
+"  /* ---------- title watcher ---------- */",
+"  function watchTitle() {",
+"    try {",
+"      var t = document.querySelector('title');",
+"      if (t &amp;&amp; window.MutationObserver) {",
+"        new MutationObserver(reportNav).observe(t, { childList: true, characterData: true, subtree: true });",
+"      }",
+"    } catch (e) { /* ignore */ }",
+"  }",
+"  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', watchTitle);",
+"  else watchTitle();",
+"",
+"  /* ---------- error forwarding (diagnostics) ---------- */",
+"  var errCount = 0;",
+"  window.addEventListener('error', function (e) {",
+"    var msg = String((e &amp;&amp; e.message) || e).slice(0, 300);",
+"    if (errCount &lt; 10) up({ type: 'err', msg: msg });",
+"    if (errCount &lt; 3) pageToast('Page error: ' + msg);",
+"    errCount++;",
+"  });",
+"",
+"  /* ---------- shell commands ---------- */",
+"  window.addEventListener('message', function (e) {",
+"    try {",
+"      var d = e.data;",
+"      if (!d || d.zai !== 1 || !d.cmd) return;",
+"      /* trusted senders: the worker itself, and the saved pocket file",
+"       * (file:// origin on Chrome, null on Safari) hosting the",
+"       * sandboxed app view */",
+"      if (e.origin !== 'null' &amp;&amp; e.origin !== 'file://' &amp;&amp; WORKER &amp;&amp; e.origin !== WORKER) return;",
+"      if (SD &amp;&amp; d.cmd !== 'init' &amp;&amp; d.cmd !== 'getstate') {",
+"        /* v5 sandbox: back/forward/reload/navigate are SHELL-owned \u2014 the",
+"         * shell re-renders entries itself; only state exchange reaches",
+"         * the frame. Anything else still arrives (e.g. from the worker)",
+"         * and is forwarded as a request. */",
+"        if (d.cmd === 'back') { up({ type: 'goback' }); return; }",
+"        if (d.cmd === 'forward') { up({ type: 'gofwd' }); return; }",
+"        if (d.cmd === 'reload') { up({ type: 'reloadreq' }); return; }",
+"        if (d.cmd === 'navigate') { if (d.url) nav(String(d.url)); return; }",
+"      }",
+"      switch (d.cmd) {",
+"        case 'init':",
+"          if (Array.isArray(d.jar)) {",
+"            var jarM = {};",
+"            jar.forEach(function (c) { if (c &amp;&amp; c.name) jarM[c.name] = c; });",
+"            d.jar.forEach(function (c) { if (c &amp;&amp; c.name) jarM[c.name] = c; });",
+"            jar = Object.keys(jarM).map(function (k) { return jarM[k]; });",
+"          }",
+"          if (d.ls) {",
+"            Object.keys(d.ls).forEach(function (k) {",
+"              if (!(k in lsMirror)) lsMirror[k] = d.ls[k];",
+"            });",
+"          }",
+"          seedDocumentCookies();",
+"          reportNav();",
+"          break;",
+"        case 'back': history.back(); break;",
+"        case 'forward': history.forward(); break;",
+"        case 'reload': location.reload(); break;",
+"        case 'navigate':",
+"          if (d.url) location.href = mapUrl(String(d.url));",
+"          break;",
+"        case 'getstate': reportNav(); break;",
+"        case 'probe':",
+"          /* v6 debug channel: the shell (or a test) asks, the frame answers",
+"           * with the state the app actually sees. Used for diagnosing",
+"           * captcha/login flows inside the opaque sandbox. */",
+"          try {",
+"            var pScripts = [];",
+"            try {",
+"              var pList = document.querySelectorAll('script[src]');",
+"              for (var pi = 0; pi &lt; pList.length &amp;&amp; pi &lt; 14; pi++) pScripts.push(pList[pi].getAttribute('src'));",
+"            } catch (eSl) { /* ignore */ }",
+"            up({",
+"              type: 'probe',",
+"              doc: DOC || '',",
+"              locHref: (window.__zaiLoc &amp;&amp; window.__zaiLoc.href) || '',",
+"              realHref: (function () { try { return location.href; } catch (eR) { return '(throws)'; } })(),",
+"              initAliyun: typeof window.initAliyunCaptcha,",
+"              aliCfg: typeof window.AliyunCaptchaConfig === 'object' ? 'set' : 'unset',",
+"              scripts: pScripts,",
+"              forms: (function () { var n = 0; try { n = document.querySelectorAll('form').length; } catch (eF) { } return n; })(),",
+"              title: document.title || ''",
+"            });",
+"          } catch (eP) { /* ignore */ }",
+"          break;",
+"      }",
+"    } catch (err) { /* ignore */ }",
+"  });",
+"",
+"  /* ---------- v5: escape sentinel --------------------------------------",
+"   * pagehide fires when this frame navigates ANYWHERE (the one thing",
+"   * the location rewrites could not catch \u2014 e.g. `window.location = X`",
+"   * left raw on purpose, or location.reload()). The shell re-arms this",
+"   * around intentional srcdoc swaps; an UNARMED 'bye' means the document",
+"   * escaped \u2014 the shell recovers by re-rendering the current entry. */",
+"  try {",
+"    if (SD) window.addEventListener('pagehide', function () { up({ type: 'bye' }); });",
+"  } catch (eBye) { /* ignore */ }",
+"",
+"  /* ---------- boot ---------- */",
+"  up({ type: 'hello', url: curUrl(), title: document.title || '' });",
+"  reportNav();",
+"  /* ---------- v6: boot diagnostic (the shell logs this; ZAI-MSG probes read it) ----------",
+"   * Reports what the app's location reads will answer during THIS boot:",
+"   * the fake location the router hydrates against, plus the real frame",
+"   * URL for comparison. Cheap, quiet, and it settles routing questions",
+"   * without cross-origin DOM access. */",
+"  try {",
+"    setTimeout(function () {",
+"      up({",
+"        type: 'bootdiag',",
+"        doc: DOC || '',",
+"        fakeHref: (window.__zaiLoc &amp;&amp; window.__zaiLoc.href) || '',",
+"        fakePath: (window.__zaiLoc &amp;&amp; window.__zaiLoc.pathname) || '',",
+"        realHref: (function () { try { return location.href; } catch (e) { return '(throws)'; } })(),",
+"        title: document.title || ''",
+"      });",
+"    }, 2500);",
+"  } catch (eDiag) { /* ignore */ }",
+"})();",
+""
+].join("\n");
+
+/* ============================================================ */
+
+addEventListener('fetch', (event) =&gt; {
+  event.respondWith(handle(event.request, event));
+});
+
+async function handle(req, event) {
+  try {
+    const url = new URL(req.url);
+    const method = req.method.toUpperCase();
+
+    /* ---- CORS preflight ---- */
+    if (method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: corsHeaders(req, new Headers()) });
+    }
+
+    /* ---- public endpoints ---- */
+    if (url.pathname === '/__status') {
+      const env = envOf(event);
+      const token = env.PROXY_TOKEN || '';
+      let tokenOk = null;
+      if (token) {
+        const supplied = url.searchParams.has('__t') || req.headers.get('x-proxy-token') != null;
+        if (supplied) tokenOk = (url.searchParams.get('__t') === token || req.headers.get('x-proxy-token') === token);
+      }
+      /* v5: "entry" is the tokenized ROOT DOCUMENT path — the saved
+       * pocket file fetches it to boot the app without ever knowing
+       * the token key or the upstream host. Neutral JSON: no z.ai
+       * strings anywhere in this body. */
+      const entry = tokPath(chatUpstream(event) + '/');
+      return json({ ok: true, name: VERSION, time: new Date().toISOString(), token_required: !!token, token_ok: tokenOk, entry: entry }, req);
+    }
+
+    /* ---- neutral favicon: never a proxied page ---- */
+    if (url.pathname === '/favicon.ico' || url.pathname === '/favicon.png') {
+      return new Response(null, { status: 204, headers: corsHeaders(req, new Headers()) });
+    }
+
+
+    /* ---- live upstream probe report (v3) ----
+     * Public like /__status: no secrets, and it must stay reachable
+     * in every cookie/token state — when the app "opens straight to
+     * a blocked page", this page tells the user WHY. */
+    if (url.pathname === '/__diag') {
+      return diagPage(req, event);
+    }
+
+
+    /* ---- token gate ---- */
+    const env = envOf(event);
+    const token = env.PROXY_TOKEN || '';
+    if (token &amp;&amp; !(await checkToken(req, url, token))) {
+      const accept = req.headers.get('accept') || '';
+      if (method === 'GET' &amp;&amp; accept.includes('text/html')) {
+        /* a human navigation with a wrong/missing token → the setup page
+         * (with the "not accepted" hint only when a token was tried) */
+        const attempted = url.searchParams.has('__t') || req.headers.get('x-proxy-token') != null;
+        return landing(event, attempted);
+      }
+      return json({ error: 'unauthorized', hint: 'set X-Proxy-Token header or __t query param' }, req, 401);
+    }
+
+    /* ---- token was supplied in the query: remember it, clean the URL ---- */
+    if (token &amp;&amp; url.searchParams.has('__t')) {
+      const clean = new URL(req.url);
+      clean.searchParams.delete('__t');
+      const h = new Headers({ location: clean.pathname + (clean.search || ''), 'cache-control': 'no-store' });
+      h.append('set-cookie', tokenCookie(token));
+      return new Response(null, { status: 302, headers: corsHeaders(req, h) });
+    }
+
+    /* ---- v5: the root is a NEUTRAL service page ------------------
+     * The phone never navigates here for content anymore — and it
+     * must never serve z.ai HTML, so a content classifier that
+     * fetches the root sees a boring status page, not an AI chat
+     * app. (The token gate above has already handled PROXY_TOKEN,
+     * including the __t-query 302 cleanup, so this only runs for
+     * token-satisfied or tokenless workers.) */
+    if (url.pathname === '/') {
+      return servicePage(req);
+    }
+
+    /* ---- session cookie clear ---- */
+    if (url.pathname === '/__clear') {
+      const h = new Headers({ location: '/', 'cache-control': 'no-store' });
+      /* expire every cookie the browser sent, plus the token cookie */
+      const ck = req.headers.get('cookie') || '';
+      const seen = new Set(['__zai_t']);
+      ck.split(';').forEach((kv) =&gt; {
+        const n = kv.split('=')[0].trim();
+        if (n) seen.add(n);
+      });
+      seen.forEach((n) =&gt; h.append('set-cookie', n + '=; Path=/; Max-Age=0; Secure; SameSite=None; Partitioned'));
+      return new Response(null, { status: 302, headers: corsHeaders(req, h) });
+    }
+
+    /* ---- websocket upgrade ---- */
+    if (req.headers.get('upgrade') === 'websocket') {
+      return proxyWebsocket(req, url, event);
+    }
+
+    /* ---- route resolution ---- */
+    let pfx = '';       // proxy prefix for this document ('' = transparent)
+    let upstream = null; // absolute upstream URL
+    let host = null;     // upstream host
+    let tokMode = false; // this request came through /__t/&lt;token&gt;
+
+    if (url.pathname.startsWith('/__t/')) {
+      /* v4/v5 opaque token (full absolute URL). Still the form for the
+       * entry boot handle and every URL the runtime patch maps at run
+       * time (fetch/XHR paths — no relative resolution happens against
+       * those). */
+      const tok = url.pathname.slice(5);
+      const dec = decTok(tok);
+      if (!dec || !/^https?:\/\//i.test(dec)) {
+        return json({ error: 'bad token' }, req, 400);
+      }
+      const du = new URL(dec);
+      if (!hostAllowed(du.host, event)) {
+        return json({ error: 'host not allowed', allowed_suffixes: allowList(event) }, req, 403);
+      }
+      host = du.host;
+      pfx = '';
+      upstream = du.toString();
+      tokMode = true;
+    } else if (url.pathname.startsWith('/__o/')) {
+      /* v6 path-preserving origin token: '/__o/&lt;otok&gt;/&lt;upstream path&gt;'.
+       * Everything the worker embeds in HTML/CSS/redirect Locations uses
+       * this form so RELATIVE references (dynamic import(), css url(),
+       * &lt;base&gt;-resolved runtime URLs) resolve to worker URLs that still
+       * carry the upstream path — the module-chunk 400 bug is dead. */
+      const rest0 = url.pathname.slice(5);
+      const slash = rest0.indexOf('/');
+      const otok = slash &lt; 0 ? rest0 : rest0.slice(0, slash);
+      const upath = slash &lt; 0 ? '/' : rest0.slice(slash);
+      const dec = decTok(otok);
+      if (!otok || !dec || !/^https?:\/\/[a-z0-9.:-]+\/?$/i.test(dec)) {
+        return json({ error: 'bad origin token' }, req, 400);
+      }
+      const origin = dec.replace(/\/+$/, '');
+      const ou = new URL(origin + '/');
+      if (!hostAllowed(ou.host, event)) {
+        return json({ error: 'host not allowed', allowed_suffixes: allowList(event) }, req, 403);
+      }
+      host = ou.host;
+      pfx = '';
+      upstream = origin + upath + url.search;
+      tokMode = true;
+    } else if (url.pathname.startsWith('/p/')) {
+      const rest = url.pathname.slice(3); // "&lt;host&gt;/path..."
+      const slash = rest.indexOf('/');
+      host = slash &lt; 0 ? rest : rest.slice(0, slash);
+      const path = slash &lt; 0 ? '/' : rest.slice(slash);
+      if (!hostAllowed(host)) {
+        return json({ error: 'host not allowed', host: host, allowed_suffixes: allowList(event) }, req, 403);
+      }
+      pfx = '/p/' + host;
+      upstream = 'https://' + host + path + url.search;
+    } else {
+      /* v5: bare paths no longer mirror chat.z.ai — the transparent
+       * catch-all is GONE. Nothing navigates to this worker; the only
+       * content route is /__t/&lt;token&gt;. Answer a neutral 404 so the
+       * origin never serves anything classifiable. */
+      return json({ ok: false, service: 'zp', status: 404, note: 'nothing is served at this path' }, req, 404);
+    }
+
+    /* ---- query handling ----
+     * Transparent/legacy requests may carry the proxy token (__t) in
+     * the query — strip it before going upstream. Token requests carry
+     * their whole query INSIDE the token; any extra params the browser
+     * appended (e.g. EventSource adding __t) are merged in, minus __t. */
+    const upUrl = new URL(upstream);
+    if (tokMode) {
+      for (const [k, v] of url.searchParams) {
+        if (k === '__t') continue;
+        if (!upUrl.searchParams.has(k)) upUrl.searchParams.set(k, v);
+      }
+    } else if (upUrl.searchParams.has('__t')) {
+      upUrl.searchParams.delete('__t');
+    }
+
+    /* ---- build upstream request ---- */
+    const h = new Headers();
+    const skipReq = new Set(['host', 'origin', 'referer', 'cookie', 'connection', 'keep-alive', 'upgrade',
+      'proxy-connection', 'te', 'trailer', 'transfer-encoding', 'content-length', 'accept-encoding',
+      'x-cookie', 'x-proxy-token', 'x-set-cookie']);
+    /* v3: Cloudflare's edge injects its own connection headers
+     * (cf-connecting-ip, cf-ipcountry, cf-ray, cf-visitor,
+     * x-forwarded-for, cdn-loop, true-client-ip, ...) into every
+     * request that reaches this worker. Forwarding them to
+     * chat.z.ai — which runs behind Cloudflare itself — sends
+     * forged edge headers into another zone's WAF. They are
+     * dropped here, always. */
+    const dropExact = new Set(['cdn-loop', 'true-client-ip', 'x-real-ip']);
+    const dropPrefix = ['cf-', 'x-forwarded'];
+    for (const [k, v] of req.headers) {
+      const lk = k.toLowerCase();
+      if (skipReq.has(lk)) continue;
+      if (dropExact.has(lk)) continue;
+      let drop = false;
+      for (let i = 0; i &lt; dropPrefix.length; i++) { if (lk.startsWith(dropPrefix[i])) { drop = true; break; } }
+      if (drop) continue;
+      h.set(k, v);
+    }
+    h.set('accept-encoding', 'gzip, deflate, br');
+    h.set('cookie', mergeCookies(req.headers.get('cookie') || '', req.headers.get('x-cookie') || ''));
+    h.set('origin', 'https://' + host);
+    h.set('referer', 'https://' + host + '/');
+
+    let body = undefined;
+    let needDuplex = false;
+    if (method !== 'GET' &amp;&amp; method !== 'HEAD') {
+      const cl = parseInt(req.headers.get('content-length') || '0', 10);
+      if (cl &gt; 0 &amp;&amp; cl &lt; 32 * 1024 * 1024) {
+        body = await req.arrayBuffer(); // keeps Content-Length intact (important for OSS uploads)
+        h.set('content-length', String(body.byteLength));
+      } else {
+        body = req.body; // stream big/unknown-size uploads
+        needDuplex = true;
+      }
+    }
+
+    let res;
+    let retried = false;
+    try {
+      const fetchInit = { method: method, headers: h, redirect: 'manual' };
+      if (body !== undefined) fetchInit.body = body;
+      if (needDuplex) fetchInit.duplex = 'half';
+      res = await fetch(upUrl.toString(), fetchInit);
+      /* ---- v3: a 403/429 on a safe GET can be a WAF trip-wire fed
+       * by leftover request headers — retry ONCE with a minimal,
+       * clean header set before relaying the block page. ---- */
+      if ((res.status === 403 || res.status === 429) &amp;&amp; (method === 'GET' || method === 'HEAD')) {
+        try {
+          const res2 = await fetch(upUrl.toString(), { method: method, headers: minimalHeaders(req, host), redirect: 'manual' });
+          retried = true; /* a retry attempt happened — tagged either way */
+          if (res2.status !== res.status) {
+            try { if (res.body &amp;&amp; res.body.cancel) res.body.cancel(); } catch (e) { /* ignore */ }
+            res = res2;
+            retried = true;
+          } else {
+            try { if (res2.body &amp;&amp; res2.body.cancel) res2.body.cancel(); } catch (e) { /* ignore */ }
+          }
+        } catch (e2) { /* keep the original response */ }
+      }
+    } catch (err) {
+      return json({ error: 'upstream fetch failed', detail: String(err &amp;&amp; err.message || err) }, req, 502);
+    }
+
+    /* ---- redirect handling: rewrite Location and let the browser follow inside the worker ---- */
+    const loc = res.headers.get('location');
+    if (loc &amp;&amp; res.status &gt;= 300 &amp;&amp; res.status &lt; 400 &amp;&amp; res.status !== 304) {
+      const mapped = mapLocation(loc, upUrl, event, tokMode);
+      const rh = scrubHeaders(res.headers);
+      reissueCookies(res, rh, event);
+      rh.set('location', mapped);
+      maybeSetTokenCookie(req, rh, event);
+      return new Response(null, { status: res.status, headers: corsHeaders(req, rh) });
+    }
+
+    /* ---- normal responses ---- */
+    const ct = (res.headers.get('content-type') || '').toLowerCase();
+    const outHeaders = scrubHeaders(res.headers);
+    reissueCookies(res, outHeaders, event);
+    maybeSetTokenCookie(req, outHeaders, event);
+    outHeaders.set('x-final-url', res.url || upUrl.toString());
+    if (retried) outHeaders.set('x-zp-retry', '1');
+    const outCt = corsHeaders(req, outHeaders);
+
+    if (ct.includes('text/html')) {
+      const text = await res.text();
+      const html = rewriteHtml(text, pfx, host, new URL(req.url).origin, token, allowList(event),
+        tokMode ? upUrl.toString() : null);
+      return new Response(html, { status: res.status, headers: outCt });
+    }
+    if (ct.includes('text/css')) {
+      const text = await res.text();
+      const css = rewriteCss(text, pfx, host, allowList(event), tokMode ? upUrl.toString() : null, new URL(req.url).origin);
+      return new Response(css, { status: res.status, headers: outCt });
+    }
+    /* ---- v5: JavaScript location-assignment rewrite ----------------
+     * Inside the sandbox frame the document lives at about:srcdoc; a
+     * script that does location.href = X (or location.assign/replace)
+     * would navigate the frame OUT of the sandbox — to a URL the org
+     * filter blocks. Rewriting those tokens to __zaiLoc (the fake
+     * location object the runtime patch installs BEFORE any site
+     * script runs) turns every SPA redirect into a postMessage that
+     * the pocket shell turns into a fresh sandboxed document. Reads
+     * (location.href/pathname/origin...) are rewritten too, so SPA
+     * routers hydrate against the REAL upstream URL instead of
+     * about:srcdoc. Conservative patterns only — Superwork's v2.12
+     * lesson: an aggressive wrap can emit a syntax error and kill an
+     * entire bundle at parse time. */
+    if (tokMode &amp;&amp; /javascript|ecmascript|text\/jscript/i.test(ct)) {
+      const text = await res.text();
+      const js = rewriteJsLocation(text);
+      if (js !== text) {
+        const h2 = new Headers(outCt);
+        h2.set('x-zp-jsrw', '1');
+        return new Response(js, { status: res.status, headers: h2 });
+      }
+      return new Response(text, { status: res.status, headers: outCt });
+    }
+
+    return new Response(res.body, { status: res.status, headers: outCt });
+  } catch (err) {
+    return json({ error: 'proxy error', detail: String(err &amp;&amp; err.message || err) }, req, 500);
+  }
+}
+
+/* ============================================================ helpers */
+
+function envOf(event) {
+  return (event &amp;&amp; event.env) || globalThis.__ZAI_ENV || {};
+}
+function allowList(event) {
+  const extra = envOf(event).EXTRA_HOSTS || '';
+  const arr = ALLOW.slice();
+  String(extra).split(',').forEach((h) =&gt; {
+    h = h.trim().toLowerCase();
+    if (h &amp;&amp; arr.indexOf(h) &lt; 0) arr.push(h);
+  });
+  return arr;
+}
+function hostAllowed(host, event) {
+  host = String(host || '').toLowerCase();
+  const list = allowList(event);
+  for (const a of list) {
+    if (host === a || host.endsWith('.' + a)) return true;
+  }
+  return false;
+}
+async function checkToken(req, url, token) {
+  if (req.headers.get('x-proxy-token') === token) return true;
+  if (url.searchParams.get('__t') === token) return true;
+  const ck = req.headers.get('cookie') || '';
+  const m = ck.match(/(?:^|;\s*)__zai_t=([^;]+)/);
+  if (m &amp;&amp; decodeURIComponent(m[1]) === token) return true;
+  return false;
+}
+function tokenCookie(token) {
+  return '__zai_t=' + encodeURIComponent(token) + '; Path=/; Max-Age=31536000; Secure; SameSite=None; Partitioned';
+}
+function redirect(req, to) {
+  const h = new Headers({ location: to, 'cache-control': 'no-store' });
+  return new Response(null, { status: 302, headers: corsHeaders(req, h) });
+}
+function maybeSetTokenCookie(req, h, event) {
+  const token = envOf(event).PROXY_TOKEN || '';
+  if (!token) return;
+  const ck = req.headers.get('cookie') || '';
+  if (ck.indexOf('__zai_t=') &gt;= 0) return;
+  h.append('set-cookie', tokenCookie(token));
+}
+
+function mergeCookies(a, b) {
+  const seen = new Map();
+  const add = (str) =&gt; {
+    if (!str) return;
+    str.split(';').forEach((kv) =&gt; {
+      kv = kv.trim();
+      if (!kv) return;
+      const name = kv.split('=')[0];
+      if (!seen.has(name)) seen.set(name, kv);
+    });
+  };
+  add(a); // browser-native cookies win
+  add(b); // patch-supplied fallback cookies fill gaps
+  return Array.from(seen.values()).join('; ');
+}
+
+/* response headers we must not forward */
+const SCRUB = new Set(['content-security-policy', 'content-security-policy-report-only', 'x-frame-options',
+  'strict-transport-security', 'cross-origin-opener-policy', 'cross-origin-embedder-policy',
+  'cross-origin-resource-policy', 'content-encoding', 'content-length', 'transfer-encoding',
+  'connection', 'keep-alive', 'upgrade', 'set-cookie', 'report-to', 'nel', 'vary']);
+
+function scrubHeaders(headers) {
+  const h = new Headers();
+  for (const [k, v] of headers) {
+    if (!SCRUB.has(k.toLowerCase())) h.set(k, v);
+  }
+  return h;
+}
+
+/* re-issue upstream cookies for this worker's domain (CHIPS-partitioned so they work in the app iframe) */
+function reissueCookies(res, h, event) {
+  try {
+    let raw = [];
+    if (typeof res.headers.getSetCookie === 'function') raw = res.headers.getSetCookie();
+    else {
+      const single = res.headers.get('set-cookie');
+      if (single) raw = [single];
+    }
+    if (!raw.length) return;
+    raw.forEach((sc) =&gt; {
+      const parts = String(sc).split(';');
+      const nv = parts[0].trim();
+      if (!nv) return;
+      let expires = null, maxAge = null, httpOnly = false;
+      for (let i = 1; i &lt; parts.length; i++) {
+        const p = parts[i].trim();
+        const k = p.split('=')[0].toLowerCase();
+        if (k === 'expires') expires = p.slice(8).trim();
+        else if (k === 'max-age') maxAge = p.slice(8).trim();
+        else if (k === 'httponly') httpOnly = true;
+      }
+      let out = nv + '; Path=/; Secure; SameSite=None; Partitioned';
+      if (expires) out += '; Expires=' + expires;
+      if (maxAge !== null &amp;&amp; maxAge !== undefined &amp;&amp; maxAge !== '') out += '; Max-Age=' + maxAge;
+      if (httpOnly) out += '; HttpOnly';
+      h.append('set-cookie', out);
+    });
+    /* expose the raw cookies so the patch/shell can mirror them */
+    h.set('x-set-cookie', encodeURIComponent(JSON.stringify(raw)));
+  } catch (e) { /* ignore */ }
+}
+
+function corsHeaders(req, h) {
+  /* v6: credentialed CORS. The z.ai app calls EVERY api with
+   * credentials:"include" — and a browser REFUSES
+   * Access-Control-Allow-Origin:* on credentialed cross-origin fetches,
+   * which silently killed signin / chat-send inside the sandbox while
+   * the worker happily logged 200s. Echo the origin back — browsers
+   * send "null" for both the saved file:// pocket and its sandboxed
+   * srcdoc frame — plus allow-credentials so cookies actually flow.
+   * Anything else (random websites) keeps the wildcard WITHOUT
+   * credentials. */
+  const org = (req.headers.get('origin') || '').trim();
+  let self = '';
+  try { self = new URL(req.url).origin; } catch (e) { /* ignore */ }
+  if (org &amp;&amp; (org === 'null' || org === self)) {
+    h.set('access-control-allow-origin', org);
+    h.set('access-control-allow-credentials', 'true');
+  } else {
+    h.set('access-control-allow-origin', '*');
+  }
+  h.set('access-control-allow-methods', 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS');
+  const reqH = req.headers.get('access-control-request-headers');
+  h.set('access-control-allow-headers', reqH || '*');
+  h.set('access-control-expose-headers', 'content-disposition, content-type, x-set-cookie, x-final-url, filename, x-zp-retry, x-zp-jsrw');
+  h.set('access-control-max-age', '86400');
+  return h;
+}
+
+function json(obj, req, status) {
+  const h = new Headers({ 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+  return new Response(JSON.stringify(obj), { status: status || 200, headers: corsHeaders(req, h) });
+}
+
+/* ---- v3: the minimal clean header set used by the 403/429 retry ---- */
+function minimalHeaders(req, host) {
+  const h = new Headers();
+  const ua = req.headers.get('user-agent');
+  if (ua) h.set('user-agent', ua);
+  const al = req.headers.get('accept-language');
+  if (al) h.set('accept-language', al);
+  h.set('accept', req.headers.get('accept') || '*/*');
+  h.set('accept-encoding', 'gzip, deflate, br');
+  const ck = mergeCookies(req.headers.get('cookie') || '', req.headers.get('x-cookie') || '');
+  if (ck) h.set('cookie', ck);
+  h.set('origin', 'https://' + host);
+  h.set('referer', 'https://' + host + '/');
+  return h;
+}
+
+/* ---- v3: /__diag — live upstream probes ------------------------------
+ *
+ * Three GETs against the chat upstream, each shaped like a
+ * different worker generation, so the page shows exactly WHICH
+ * request style z.ai blocks (if any) from this worker's egress:
+ *   1. "app"     — what v3 forwards for the app document
+ *                  (browser-like, CF edge headers stripped)
+ *   2. "minimal" — accept + user-agent + origin/referer only
+ *   3. "forged"  — what v2 ACTUALLY forwarded: browser-like plus
+ *                  the Cloudflare edge headers that ride along on
+ *                  every request hitting the worker
+ */
+function esc(s) {
+  return String(s == null ? '' : s).replace(/&amp;/g, '&amp;amp;').replace(/&lt;/g, '&amp;lt;')
+    .replace(/&gt;/g, '&amp;gt;').replace(/"/g, '&amp;quot;');
+}
+
+async function diagProbe(event, kind) {
+  const host = chatHost(event);
+  const up = chatUpstream(event) + '/';
+  const h = new Headers();
+  h.set('accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8');
+  h.set('accept-encoding', 'gzip, deflate, br');
+  h.set('accept-language', 'en-US,en;q=0.9');
+  h.set('user-agent', 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36');
+  h.set('origin', 'https://' + host);
+  h.set('referer', 'https://' + host + '/');
+  if (kind === 'minimal') {
+    h.delete('accept-language');
+  }
+  if (kind === 'forged') {
+    h.set('cf-connecting-ip', '198.51.100.7');
+    h.set('cf-ipcountry', 'US');
+    h.set('cf-ray', 'diag-probe');
+    h.set('x-forwarded-for', '198.51.100.7');
+    h.set('cdn-loop', 'cloudflare');
+  }
+  try {
+    const res = await fetch(up, { method: 'GET', headers: h, redirect: 'manual' });
+    let snippet = '';
+    try { snippet = (await res.text()).slice(0, 240); } catch (e) { snippet = '(body unreadable)'; }
+    return {
+      error: false,
+      status: res.status,
+      type: (res.headers.get('content-type') || '').split(';')[0] || '(none)',
+      server: res.headers.get('server') || '(none)',
+      ray: res.headers.get('cf-ray') || '(no cf-ray — upstream not on Cloudflare)',
+      mitigated: res.headers.get('cf-mitigated') || '',
+      location: res.headers.get('location') || '',
+      snippet: snippet.trim().replace(/\s+/g, ' ')
+    };
+  } catch (err) {
+    return { error: true, status: 0, detail: String((err &amp;&amp; err.message) || err) };
+  }
+}
+
+async function diagPage(req, event) {
+  /* what the phone's own request arrived with (added by Cloudflare's
+   * edge on the way in) — the v3 worker no longer forwards these */
+  const incoming = [];
+  for (const [k, v] of req.headers) {
+    const lk = k.toLowerCase();
+    if (lk.startsWith('cf-') || lk.startsWith('x-forwarded') || lk === 'cdn-loop' || lk === 'true-client-ip' || lk === 'x-real-ip') {
+      incoming.push(k + ': ' + v);
+    }
+  }
+  const p = await Promise.all([diagProbe(event, 'app'), diagProbe(event, 'minimal'), diagProbe(event, 'forged')]);
+  const app = p[0], mini = p[1], forged = p[2];
+
+  const verdictOf = (pr) =&gt; pr.error ? 'fetch failed' : (pr.status === 200 ? 'answered normally (200)' :
+    (pr.status === 403 || pr.status === 429 ? 'BLOCKED (' + pr.status + ')' : 'HTTP ' + pr.status));
+
+  let verdict, verdictColor;
+  if (app.error || app.status !== 200) {
+    if (!app.error &amp;&amp; (app.status === 403 || app.status === 429)) {
+      verdict = 'z.ai is BLOCKING this worker\u2019s requests (HTTP ' + app.status + '). That block page is what the app shows. Send this whole page to whoever helps you.';
+      verdictColor = '#F87171';
+    } else {
+      verdict = 'The worker could not fetch the app page from ' + esc(chatHost(event)) + ' (' + esc(app.error ? app.detail : 'HTTP ' + app.status) + '). The app cannot work until this is fixed.';
+      verdictColor = '#F87171';
+    }
+  } else if (!forged.error &amp;&amp; (forged.status === 403 || forged.status === 429)) {
+    verdict = 'z.ai answers normally, but blocks the OLD v2-style request (with forwarded Cloudflare headers). Your v3 fix is exactly right \u2014 keep it deployed.';
+    verdictColor = '#FBBF24';
+  } else {
+    verdict = 'z.ai answers this worker normally. If the app still shows a block page, the block is NOT between this worker and z.ai \u2014 it is between your phone and this worker (network filter / browser). Try this page from a different network (Wi-Fi vs mobile data) to compare.';
+    verdictColor = '#4ADE80';
+  }
+
+  const probeRow = (name, desc, pr) =&gt;
+    '&lt;div class="probe"&gt;&lt;div class="ph"&gt;&lt;b&gt;' + name + '&lt;/b&gt;&lt;span class="code"&gt;' + esc(desc) + '&lt;/span&gt;&lt;/div&gt;' +
+    '&lt;div class="line"&gt;status: &lt;b class="' + (pr.error ? 'bad' : (pr.status === 200 ? 'ok' : (pr.status === 403 || pr.status === 429 ? 'bad' : 'warn'))) + '"&gt;' + esc(verdictOf(pr)) + '&lt;/b&gt;&lt;/div&gt;' +
+    (pr.error ? '&lt;div class="line"&gt;error: ' + esc(pr.detail) + '&lt;/div&gt;' :
+      '&lt;div class="line meta"&gt;type ' + esc(pr.type) + ' \u00b7 server ' + esc(pr.server) + ' \u00b7 cf-ray ' + esc(pr.ray) +
+      (pr.mitigated ? ' \u00b7 cf-mitigated ' + esc(pr.mitigated) : '') +
+      (pr.location ? ' \u00b7 location ' + esc(pr.location) : '') + '&lt;/div&gt;' +
+      '&lt;div class="snip"&gt;' + esc(pr.snippet) + '&lt;/div&gt;') +
+    '&lt;/div&gt;';
+
+  const html = '&lt;!doctype html&gt;&lt;html lang="en"&gt;&lt;head&gt;&lt;meta charset="utf-8"&gt;' +
+    '&lt;meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"&gt;' +
+    '&lt;title&gt;z.ai pocket \u2014 worker diagnostics&lt;/title&gt;' +
+    '&lt;style&gt;' +
+    ':root{--bg:#0B0D12;--panel:#14161F;--panel2:#1A1D28;--line:rgba(255,255,255,.08);--txt:#E7E9EE;--sub:#9AA1AD}' +
+    '*{box-sizing:border-box}body{margin:0;padding:18px 14px 40px;background:var(--bg);color:var(--txt);font-family:-apple-system,BlinkMacSystemFont,system-ui,"Segoe UI",Roboto,sans-serif;font-size:14px;line-height:1.55}' +
+    'h1{font-size:18px;margin:0 0 2px}.tag{color:var(--sub);font-size:12.5px;margin-bottom:14px}' +
+    '.verdict{padding:12px 14px;border-radius:12px;background:rgba(255,255,255,.05);border-left:3px solid ' + verdictColor + ';margin-bottom:14px;font-size:13.5px}' +
+    '.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:13px 14px;margin-bottom:12px}' +
+    '.card b{font-size:13px}.card .code,.snip{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;color:#B9B6FB;word-break:break-all}' +
+    '.probe{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:13px 14px;margin-bottom:12px}' +
+    '.ph{display:flex;justify-content:space-between;gap:10px;align-items:baseline;margin-bottom:6px}' +
+    '.ph .code{color:var(--sub);font-size:10.5px}' +
+    '.line{font-size:12.5px;color:#C4C9D4;margin:2px 0}.line b{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}' +
+    '.ok{color:#4ADE80}.bad{color:#F87171}.warn{color:#FBBF24}' +
+    '.meta{color:var(--sub)}.snip{margin-top:7px;padding:9px 10px;border-radius:9px;background:var(--panel2);border:1px solid var(--line);max-height:110px;overflow:hidden}' +
+    'ul{margin:6px 0 0;padding-left:18px}li{font-size:12px;color:var(--sub);margin:3px 0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all}' +
+    '.foot{color:var(--sub);font-size:11.5px;line-height:1.6}' +
+    '&lt;/style&gt;&lt;/head&gt;&lt;body&gt;' +
+    '&lt;h1&gt;z.ai pocket \u2014 worker diagnostics&lt;/h1&gt;' +
+    '&lt;div class="tag"&gt;' + esc(VERSION) + ' \u00b7 ' + esc(new Date().toISOString()) + '&lt;/div&gt;' +
+    '&lt;div class="verdict"&gt;' + esc(verdict) + '&lt;/div&gt;' +
+    probeRow('Probe 1 \u00b7 as the app (v3 style)', 'browser-like, CF headers stripped', app) +
+    probeRow('Probe 2 \u00b7 minimal', 'accept + user-agent + origin only', mini) +
+    probeRow('Probe 3 \u00b7 old v2 style', 'browser-like + forwarded CF headers', forged) +
+    '&lt;div class="card"&gt;&lt;b&gt;What your request arrived with&lt;/b&gt;' +
+    (incoming.length ? '&lt;ul&gt;' + incoming.map((l) =&gt; '&lt;li&gt;' + esc(l) + '&lt;/li&gt;').join('') + '&lt;/ul&gt;' :
+      '&lt;ul&gt;&lt;li&gt;(no Cloudflare edge headers seen \u2014 this request did not come through a Cloudflare edge)&lt;/li&gt;&lt;/ul&gt;') +
+    '&lt;div class="foot"&gt;These headers were what v2 wrongly forwarded to z.ai. v3 strips them; Probe 3 shows what z.ai thinks of them.&lt;/div&gt;&lt;/div&gt;' +
+    '&lt;div class="foot"&gt;This page made three live calls to ' + esc(chatUpstream(event)) + '/ from inside the worker. It works with or without the PROXY_TOKEN, in any cookie state.&lt;/div&gt;' +
+    '&lt;/body&gt;&lt;/html&gt;';
+
+  return new Response(html, { status: 200, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } });
+}
+
+/* map a Location header value into proxy space */
+function mapLocation(loc, upUrl, event, tokMode) {
+  try {
+    const abs = new URL(loc, upUrl);
+    if (abs.protocol !== 'https:' &amp;&amp; abs.protocol !== 'http:') return loc;
+    if (!hostAllowed(abs.host, event)) return loc; // external redirect — pass through untouched
+    if (tokMode) {
+      /* this response came from a /__t/ or /__o/ request — there is no
+       * path prefix and (v5) no transparent root anymore: EVERY allowed
+       * target becomes a worker handle. v6 uses the path-preserving
+       * /__o/ form so the destination keeps resolving relatives right. */
+      const op = oTokPath(abs.toString());
+      return op || tokPath(abs.toString());
+    }
+    if (abs.host === upUrl.host) {
+      const pfx = prefixForHost(upUrl.host, event);
+      return pfx + abs.pathname + abs.search;
+    }
+    return tokPath(abs.toString()); // v4: opaque token, host stays unreadable
+  } catch (e) {
+    return loc;
+  }
+}
+function prefixForHost(host, event) {
+  if (host === chatHost(event)) return ''; // transparent: the app lives at /
+  return '/p/' + host;
+}
+
+/* ---------------- HTML rewriting ---------------- */
+/* Map a URL-ish attribute value into proxy space.
+ * tokDoc: set when this document was itself served through
+ *         /__t/&lt;token&gt; — it has NO path prefix to re-attach, so
+ *         every URL it references (absolute, root-relative,
+ *         relative) must be absolutized against tokDoc and
+ *         tokenized: that is what keeps the whole app sandboxed
+ *         inside opaque worker paths.
+ * v5: in tokDoc mode the token path is emitted ABSOLUTE (worker
+ *         origin + /__t/…) because the document is painted into an
+ *         about:srcdoc frame — a relative "/__t/…" cannot resolve
+ *         against about:srcdoc's inherited file:// base, so every
+ *         subresource (script, css, img) would silently fail. */
+function mapAttr(v, pfx, host, allow, tokDoc, workerOrigin) {
+  try {
+    const s = String(v || '').trim();
+    if (!s) return v;
+    if (/^(data|blob|about|javascript|mailto|tel|sms|intent|ms-|chrome|file|#)/i.test(s)) return v;
+    if (tokDoc) {
+      const abs = new URL(s, tokDoc);
+      if (abs.protocol !== 'https:' &amp;&amp; abs.protocol !== 'http:') return v;
+      const ok = allow.some((a) =&gt; abs.host === a || abs.host.endsWith('.' + a));
+      if (!ok) return v;
+      /* v6: /__o/ path-preserving form (absolute). The upstream PATH
+       * rides along so relative references against this URL — dynamic
+       * import() of sibling chunks above all — resolve to worker URLs
+       * that reconstruct the right upstream file. The /__t/ full-token
+       * form made "./chunk.js" resolve to /__t/chunk.js -&gt; 400. */
+      const op = oTokPath(abs.toString());
+      return op ? (workerOrigin ? workerOrigin.replace(/\/$/, '') + op : op) : v;
+    }
+    let m;
+    if ((m = s.match(/^https?:\/\/([^\/?#]+)/i))) {
+      const h = m[1].toLowerCase();
+      const ok = allow.some((a) =&gt; h === a || h.endsWith('.' + a));
+      if (!ok) return v;
+      if (h === host) {
+        const rest = s.slice(m[0].length) || '/';
+        return pfx + rest;
+      }
+      return tokPath(s); // v4: opaque token, host stays unreadable
+    }
+    if ((m = s.match(/^\/\/([^\/?#]+)/))) {
+      const h = m[1].toLowerCase();
+      const ok = allow.some((a) =&gt; h === a || h.endsWith('.' + a));
+      if (!ok) return v;
+      if (h === host) {
+        const rest = s.slice(m[0].length) || '/';
+        return pfx + rest;
+      }
+      return tokPath('https:' + s); // protocol-relative → https token
+    }
+    if (s.charAt(0) === '/' &amp;&amp; s.charAt(1) !== '/') return pfx + s;
+    return v;
+  } catch (e) {
+    return v;
+  }
+}
+
+const ATTR_NAMES = 'href|src|action|formaction|poster|data-src|data-href|data-url|data-background';
+
+function rewriteHtml(text, pfx, host, workerOrigin, token, allow, tokDoc) {
+  try {
+    /* strip CSP meta tags and base targets */
+    text = text.replace(/&lt;meta[^&gt;]+http-equiv\s*=\s*["']?content-security-policy["']?[^&gt;]*&gt;/gi, '');
+    text = text.replace(/&lt;base\b([^&gt;]*?)\s+target\s*=\s*["'][^"']*["']/gi, '&lt;base$1');
+
+    /* rewrite URL attributes */
+    const attrRe = new RegExp('(\\s(?:' + ATTR_NAMES + ')\\s*=\\s*)("([^"]*)"|\'([^\']*)\')', 'gi');
+    text = text.replace(attrRe, (whole, pre, quoted, dq, sq) =&gt; {
+      const v = dq !== undefined ? dq : sq;
+      const nv = mapAttr(v, pfx, host, allow, tokDoc, workerOrigin);
+      if (nv === v) return whole;
+      return pre + '"' + String(nv).replace(/"/g, '%22') + '"';
+    });
+
+    /* srcset lists */
+    const ssRe = /(\ssrcset\s*=\s*)("([^"]*)"|'([^']*)')/gi;
+    text = text.replace(ssRe, (whole, pre, quoted, dq, sq) =&gt; {
+      const v = dq !== undefined ? dq : sq;
+      const nv = v.split(',').map((cand) =&gt; {
+        const t = cand.trim();
+        if (!t) return '';
+        const sp = t.indexOf(' ');
+        const u = sp &lt; 0 ? t : t.slice(0, sp);
+        const rest = sp &lt; 0 ? '' : t.slice(sp);
+        const nu = mapAttr(u, pfx, host, allow, tokDoc, workerOrigin);
+        return nu === u ? t : nu + rest;
+      }).filter(Boolean).join(', ');
+      if (nv === v) return whole;
+      return pre + '"' + nv + '"';
+    });
+
+    /* url() inside style="..." attributes only (inline JS safety) */
+    const styleRe = /(\sstyle\s*=\s*)("([^"]*)"|'([^']*)')/gi;
+    text = text.replace(styleRe, (whole, pre, quoted, dq, sq) =&gt; {
+      const v = dq !== undefined ? dq : sq;
+      const nv = v.replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/gi, (w, q, u) =&gt; {
+        const nu = mapAttr(u, pfx, host, allow, tokDoc, workerOrigin);
+        return nu === u ? w : "url('" + nu + "')";
+      });
+      if (nv === v) return whole;
+      return pre + '"' + nv.replace(/"/g, '&amp;quot;') + '"';
+    });
+
+    /* inject config + runtime patch as the first script; v6 also injects
+     * a &lt;base&gt; pointing at this document's /__o/ mirror — the sandbox
+     * document sits at about:srcdoc where relative URLs resolve against
+     * NOTHING, so runtime-created refs (img.src = "foo.png", dynamic
+     * import("./chunk.js") inside inline scripts, form submits without
+     * actions) would all die. With &lt;base&gt; they resolve onto the worker,
+     * path-preserved. The runtime's document.baseURI override still
+     * reports the upstream URL to the app, so routers hydrate right. */
+    const cfg = { pfx: pfx, host: host, worker: workerOrigin, token: token || '', allow: allow,
+      key: TOK_KEY, tok: !!tokDoc, doc: tokDoc || '', sd: !!tokDoc };
+    let inject = '&lt;scr' + 'ipt&gt;window.__ZAI__=' + JSON.stringify(cfg) + ';' + PATCH_JS + '&lt;/scr' + 'ipt&gt;';
+    if (tokDoc) {
+      try {
+        const bOp = oTokPath(tokDoc);
+        if (bOp) inject = '&lt;base href="' + (workerOrigin ? workerOrigin.replace(/\/$/, '') : '') + bOp + '"&gt;' + inject;
+      } catch (eB) { /* ignore */ }
+    }
+    if (/&lt;head[^&gt;]*&gt;/i.test(text)) text = text.replace(/&lt;head[^&gt;]*&gt;/i, (m) =&gt; m + inject);
+    else if (/&lt;html[^&gt;]*&gt;/i.test(text)) text = text.replace(/&lt;html[^&gt;]*&gt;/i, (m) =&gt; m + inject);
+    else text = inject + text;
+    return text;
+  } catch (e) {
+    return text;
+  }
+}
+
+function rewriteCss(text, pfx, host, allow, tokDoc, workerOrigin) {
+  try {
+    text = text.replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/gi, (w, q, u) =&gt; {
+      const nu = mapAttr(u, pfx, host, allow, tokDoc, workerOrigin);
+      return nu === u ? w : 'url("' + nu + '")';
+    });
+    text = text.replace(/@import\s*(['"])([^'"]+)\1/gi, (w, q, u) =&gt; {
+      /* \s* — z.ai's CDN ships minified css like @import"https://…";
+       * with NO space and NO parens. That exact form leaked the
+       * upstream hostname straight to the browser once. */
+      const nu = mapAttr(u, pfx, host, allow, tokDoc, workerOrigin);
+      return nu === u ? w : '@import "' + nu + '"';
+    });
+    return text;
+  } catch (e) {
+    return text;
+  }
+}
+
+/* ---------------- v5: JS location-assignment rewrite ----------------
+ * Served scripts may navigate the sandbox frame with
+ *   location.href = X · location.assign/replace(X)
+ * and SPA routers read location.href / pathname / origin to hydrate.
+ * Inside the sandbox the document sits at about:srcdoc, so reads are
+ * nonsense and writes navigate OUT (straight into the org filter).
+ * Every occurrence of those tokens becomes __zaiLoc.&lt;prop&gt; — the fake
+ * location the runtime patch installs first: reads answer the REAL
+ * upstream URL, writes postMessage the pocket shell (the href property
+ * carries a setter, so `__zaiLoc.href = X` is valid even inside
+ * ternaries). Patterns are deliberately conservative — the Superwork
+ * v2.12 lesson: one bad wrap is a parse-time syntax error that kills a
+ * whole bundle. `location = X` / `window.location = X` LVALUE forms are
+ * left RAW (a real navigation the shell's escape recovery catches).
+ * A prop name after `location.` keeps this from ever touching bare
+ * `location` reads or unrelated identifiers. */
+function rewriteJsLocation(text) {
+  try {
+    if (!/location\b/.test(text)) return text;
+    let out = text;
+    /* member forms, prefixed (window/document/self/top/parent/globalThis): */
+    out = out.replace(/(?:window|document|self|top|parent|globalThis|global)\.location\.(href|assign|replace|reload|pathname|search|hash|origin|host|hostname|protocol|port|toString)\b/gi,
+      (w, prop) =&gt; '__zaiLoc.' + prop);
+    /* bare location.&lt;prop&gt; — the leading (?&lt;![.\w$]) stops it from
+     * matching x.location.href (nested-frame access) or mylocation.href: */
+    out = out.replace(/(?&lt;![.\w$])location\.(href|assign|replace|reload|pathname|search|hash|origin|host|hostname|protocol|port|toString)\b/gi,
+      (w, prop) =&gt; '__zaiLoc.' + prop);
+    return out;
+  } catch (e) {
+    return text;
+  }
+}
+
+/* ---------------- v5: neutral service page (the root) ----------------
+ * Everything a classifier can crawl at this origin must look like a
+ * boring uptime page: no product names, no chat UI, no z.ai strings,
+ * no AI vocabulary. The real app only ever lives behind opaque
+ * /__t/&lt;token&gt; fetches. */
+function servicePage(req) {
+  const html = '&lt;!doctype html&gt;&lt;html lang="en"&gt;&lt;head&gt;&lt;meta charset="utf-8"&gt;' +
+    '&lt;meta name="viewport" content="width=device-width, initial-scale=1"&gt;' +
+    '&lt;title&gt;service&lt;/title&gt;' +
+    '&lt;style&gt;body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#F2F3F5;color:#3A3D45;font:15px/1.5 -apple-system,BlinkMacSystemFont,system-ui,"Segoe UI",Roboto,sans-serif}' +
+    '.c{text-align:center}.d{width:44px;height:44px;margin:0 auto 14px;border-radius:50%;background:#1F9D55;display:flex;align-items:center;justify-content:center}.d svg{width:24px;height:24px}' +
+    'h1{margin:0;font-size:17px;font-weight:600;color:#101114}p{margin:6px 0 0;color:#82868F;font-size:13px}' +
+    'code{font:12px/1 ui-monospace,SFMono-Regular,Menlo,monospace;background:#E3E5EA;border-radius:6px;padding:2px 6px;color:#3A3D45}&lt;/style&gt;&lt;/head&gt;' +
+    '&lt;body&gt;&lt;div class="c"&gt;&lt;div class="d"&gt;&lt;svg viewBox="0 0 64 64"&gt;&lt;path d="M18 34l10 10 20-24" stroke="#fff" stroke-width="7" fill="none" stroke-linecap="round" stroke-linejoin="round"/&gt;&lt;/svg&gt;&lt;/div&gt;' +
+    '&lt;h1&gt;Service online&lt;/h1&gt;' +
+    '&lt;p&gt;Relay endpoint &amp;middot; status at &lt;code&gt;/__status&lt;/code&gt;&lt;/p&gt;' +
+    '&lt;/div&gt;&lt;/body&gt;&lt;/html&gt;';
+  return new Response(html, { status: 200, headers: corsHeaders(req, new Headers({ 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })) });
+}
+
+/* ---------------- websocket proxy ---------------- */
+async function proxyWebsocket(req, url, event) {
+  try {
+    /* resolve upstream ws url — the whole worker mirrors chat.z.ai */
+    let target;
+    let tokMode = false;
+    if (url.pathname.startsWith('/__t/')) {
+      /* v4: opaque token (encodes the original ws/wss or http/https URL) */
+      const dec = decTok(url.pathname.slice(5));
+      if (!dec) return json({ error: 'bad token' }, req, 400);
+      let t = dec;
+      if (/^https?:\/\//i.test(t)) t = t.replace(/^http/i, 'ws');
+      if (!/^wss?:\/\//i.test(t)) return json({ error: 'bad token' }, req, 400);
+      const tu = new URL(t);
+      if (!hostAllowed(tu.host, event)) return json({ error: 'host not allowed' }, req, 403);
+      target = t;
+      tokMode = true;
+    } else if (url.pathname.startsWith('/p/')) {
+      const rest = url.pathname.slice(3);
+      const slash = rest.indexOf('/');
+      const host = slash &lt; 0 ? rest : rest.slice(0, slash);
+      const path = slash &lt; 0 ? '/' : rest.slice(slash);
+      if (!hostAllowed(host, event)) return json({ error: 'host not allowed' }, req, 403);
+      target = 'wss://' + host + path + url.search;
+    } else {
+      target = chatUpstream(event).replace(/^http/, 'ws') + url.pathname + url.search;
+    }
+    const t = new URL(target);
+    if (tokMode) {
+      /* merge browser-appended query params (minus __t) into the token's URL */
+      for (const [k, v] of url.searchParams) {
+        if (k === '__t') continue;
+        if (!t.searchParams.has(k)) t.searchParams.set(k, v);
+      }
+    }
+    if (t.searchParams.has('__t')) t.searchParams.delete('__t');
+
+    const upHeaders = new Headers({ 'Upgrade': 'websocket' });
+    const ck = mergeCookies(req.headers.get('cookie') || '', req.headers.get('x-cookie') || '');
+    if (ck) upHeaders.set('cookie', ck);
+    upHeaders.set('origin', 'https://' + t.host);
+
+    const upRes = await fetch(t.toString(), { headers: upHeaders });
+    const upWs = upRes.webSocket;
+    if (!upWs) return json({ error: 'upstream refused websocket' }, req, 502);
+    upWs.accept();
+
+    const pair = new WebSocketPair();
+    const client = pair[0];
+    const server = pair[1];
+    client.accept();
+
+    upWs.addEventListener('message', (e) =&gt; { try { client.send(e.data); } catch (err) { /* ignore */ } });
+    client.addEventListener('message', (e) =&gt; { try { upWs.send(e.data); } catch (err) { /* ignore */ } });
+    upWs.addEventListener('close', (e) =&gt; { try { client.close(e.code || 1000, e.reason || ''); } catch (err) { /* ignore */ } });
+    client.addEventListener('close', (e) =&gt; { try { upWs.close(e.code || 1000, e.reason || ''); } catch (err) { /* ignore */ } });
+    upWs.addEventListener('error', () =&gt; { try { client.close(); } catch (err) { /* ignore */ } });
+
+    return new Response(null, { status: 101, webSocket: client });
+  } catch (err) {
+    return json({ error: 'websocket proxy failed', detail: String(err &amp;&amp; err.message || err) }, req, 500);
+  }
+}
+
+/* ---------------- landing / token setup page ---------------- */
+const FAVICON_SVG = '&lt;svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"&gt;&lt;rect width="64" height="64" rx="14" fill="#171A23"/&gt;&lt;path d="M18 20h28v7H33.5L46 44h-8.5L27 30.5V44h-9z" fill="#7C6CF0"/&gt;&lt;/svg&gt;';
+
+function landing(event, bad) {
+  const html = '&lt;!doctype html&gt;&lt;html lang="en"&gt;&lt;head&gt;&lt;meta charset="utf-8"&gt;' +
+    '&lt;meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"&gt;' +
+    '&lt;meta name="theme-color" content="#0B0D12"&gt;' +
+    '&lt;title&gt;zp service — setup&lt;/title&gt;' +
+    '&lt;link rel="icon" href="data:image/svg+xml,' + encodeURIComponent(FAVICON_SVG) + '"&gt;' +
+    '&lt;style&gt;' +
+    ':root{--bg:#0B0D12;--panel:#14161F;--panel2:#1A1D28;--line:rgba(255,255,255,.08);--txt:#E7E9EE;--sub:#9AA1AD;--acc:#6E6AF8;--bad:#F87171}' +
+    '*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}' +
+    'body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;background:radial-gradient(1100px 500px at 50% -12%,rgba(110,106,248,.14),transparent 60%),var(--bg);color:var(--txt);font-family:-apple-system,BlinkMacSystemFont,system-ui,"Segoe UI",Roboto,sans-serif;font-size:15px;line-height:1.5}' +
+    '.card{width:100%;max-width:400px;background:var(--panel);border:1px solid var(--line);border-radius:22px;padding:28px 22px;box-shadow:0 24px 60px rgba(0,0,0,.5)}' +
+    '.logoRow{display:flex;align-items:center;gap:12px;margin-bottom:18px}' +
+    '.logo{width:46px;height:46px;border-radius:13px;background:linear-gradient(135deg,#6E6AF8,#4E4AC8);display:flex;align-items:center;justify-content:center;flex:none;box-shadow:0 8px 24px rgba(110,106,248,.35)}' +
+    '.logo svg{width:26px;height:26px}' +
+    'h1{margin:0;font-size:21px;letter-spacing:.2px}' +
+    '.tag{color:var(--sub);font-size:13px;margin-top:2px}' +
+    'label{display:block;font-size:12.5px;color:var(--sub);margin:14px 0 7px;font-weight:600;letter-spacing:.3px}' +
+    '.inWrap{display:flex;align-items:center;background:var(--panel2);border:1px solid var(--line);border-radius:13px;padding:0 12px;transition:border-color .15s}' +
+    '.inWrap:focus-within{border-color:var(--acc)}' +
+    'input{flex:1;background:none;border:none;outline:none;padding:13px 0;font-size:15px;color:var(--txt);min-width:0}' +
+    'input::placeholder{color:#5b6270}' +
+    '.btn{display:flex;align-items:center;justify-content:center;width:100%;margin-top:16px;padding:14px;border:none;border-radius:14px;font:inherit;font-weight:650;font-size:15px;background:var(--acc);color:#fff;cursor:pointer}' +
+    '.btn:active{transform:scale(.985)}' +
+    '.err{margin-top:12px;padding:10px 12px;border-radius:10px;background:rgba(248,113,113,.1);border:1px solid rgba(248,113,113,.35);color:#FDA4AF;font-size:13px;line-height:1.5}' +
+    '.hint{margin-top:14px;color:var(--sub);font-size:12.5px;line-height:1.6}' +
+    '.hint b{color:var(--txt)}' +
+    '&lt;/style&gt;&lt;/head&gt;&lt;body&gt;&lt;div class="card"&gt;' +
+    '&lt;div class="logoRow"&gt;&lt;div class="logo"&gt;&lt;svg viewBox="0 0 64 64"&gt;&lt;path d="M18 20h28v7H33.5L46 44h-8.5L27 30.5V44h-9z" fill="#fff"/&gt;&lt;/svg&gt;&lt;/div&gt;' +
+    '&lt;div&gt;&lt;h1&gt;zp service&lt;/h1&gt;&lt;div class="tag"&gt;This endpoint is protected by an access token.&lt;/div&gt;&lt;/div&gt;&lt;/div&gt;' +
+    (bad ? '&lt;div class="err"&gt;That token was not accepted — check it and try again.&lt;/div&gt;' : '') +
+    '&lt;form method="GET" action="/"&gt;' +
+    '&lt;label for="t"&gt;PROXY TOKEN&lt;/label&gt;' +
+    '&lt;div class="inWrap"&gt;&lt;input id="t" name="__t" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="paste your PROXY_TOKEN" autofocus&gt;&lt;/div&gt;' +
+    '&lt;button class="btn" type="submit"&gt;Continue&amp;nbsp;&amp;rarr;&lt;/button&gt;&lt;/form&gt;' +
+    '&lt;div class="hint"&gt;The token lives in your worker\u2019s &lt;b&gt;Settings &amp;rarr; Variables &amp;rarr; PROXY_TOKEN&lt;/b&gt; on dash.cloudflare.com. ' +
+    'It is stored in a cookie on this device, so you only enter it once.&lt;/div&gt;' +
+    '&lt;/div&gt;&lt;/body&gt;&lt;/html&gt;';
+  return new Response(html, { status: bad ? 401 : 200, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } });
+}
+</textarea>
+  </details>
+
+  <h2 class="sec"><span class="n">3</span>zai-copier.html — this whole page, in one copy</h2>
+
+  <div class="card">
+    <b>Carry the entire build in a single paste</b>
+    <ol>
+      <li>Tap <b>Copy the whole copier page</b> below. Everything on this page goes to your clipboard in one piece: the interface, the checksum machinery, the full worker code, the full app file — all of it.</li>
+      <li>Paste it into any notes app and save it as <b>zai-copier.html</b> — or email the paste to yourself, or drop it into any text storage you trust.</li>
+      <li>Open that saved file on your phone and it behaves exactly like this one: same buttons, same badges, same embedded worker + pocket. The copy can make its own copies — endlessly, offline, no chat needed.</li>
+    </ol>
+    <div class="note">v6.2: the snapshot is taken the instant this page loads — before anything is drawn — so what you copy is the pristine source. The badge below re-parses that exact snapshot in memory and re-checks both embedded files against their baked checksums: it proves the paste will carry both files byte-exact before you even leave this page.</div>
+  </div>
+
+  <div class="meta" id="metaSelf">checking the page snapshot…</div>
+
+  <button class="btn" id="sCopy">Copy the whole copier page</button>
+  <div class="row">
+    <button class="btn ghost" id="sSave">Save the page file</button>
+    <button class="btn ghost" id="sSel">Select all</button>
+  </div>
+  <details id="detSelf"><summary>Show the page source</summary>
+    <textarea id="codeSelf" readonly="" spellcheck="false" autocapitalize="off" autocorrect="off" wrap="soft" aria-label="whole copier page source"></textarea>
+  </details>
+
+  <div class="card">
+    <b>Keep this page</b>
+    <ol>
+      <li>Keep <b>this copier page</b> on your phone: tap <b>Copy the whole copier page</b> in section 3 and save the paste as <b>zai-copier.html</b> — or tap <b>Save the page file</b> there.</li>
+      <li>Whenever a file gets lost or a paste looks wrong, open this page and copy it again — the checksum next to each file tells you the embedded copy is still intact.</li>
+      <li>This page is the full build: pocket app file + worker, nothing else needed, no internet needed.</li>
+    </ol>
+  </div>
+
+  <div class="foot">Offline by design — this page makes zero network requests. Checksums are FNV-1a over the exact UTF-8 bytes of each file.</div>
+
+</div>
+<div id="toast"></div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* v6.2 — pristine snapshot of this entire page, captured before anything draws.
+     Nothing above this line may touch the DOM. */
+  var SELF = '<!doctype html>\n' + document.documentElement.outerHTML;
+
+  var el = function (id) { return document.getElementById(id); };
+  var toastTimer = null;
+
+  function toast(msg) {
+    var t = el('toast');
+    t.textContent = msg;
+    t.classList.add('on');
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { t.classList.remove('on'); }, 3600);
+  }
+
+  function fmt(n) {
+    return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  }
+
+  /* FNV-1a 32-bit over the UTF-8 bytes of the text */
+  function fnv1a(bytes) {
+    var h = 0x811c9dc5;
+    for (var i = 0; i < bytes.length; i++) {
+      h ^= bytes[i];
+      h = (h + (h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24)) >>> 0;
+    }
+    return ('0000000' + h.toString(16)).slice(-8);
+  }
+
+  var BAKED = {"pocket":{"name":"zai-pocket.html","bytes":39091,"chars":39059,"lines":865,"hash":"b3a88634"},"worker":{"name":"zai-proxy-worker.js","bytes":120608,"chars":120469,"lines":2504,"hash":"a5b80a2b"}};
+
+  /* ---- v6.2: whole-page self copy + self-verification ---- */
+  var selfTa = el('codeSelf');
+  selfTa.value = SELF;
+
+  (function selfCheck() {
+    var mEl = el('metaSelf');
+    try {
+      var snap = new DOMParser().parseFromString(SELF, 'text/html');
+      var tp = snap.getElementById('codePocket');
+      var tw = snap.getElementById('codeWorker');
+      var okP = false;
+      var okW = false;
+      if (tp && tw) {
+        var bp = new TextEncoder().encode(tp.value);
+        var bw = new TextEncoder().encode(tw.value);
+        okP = bp.length === BAKED.pocket.bytes && fnv1a(bp) === BAKED.pocket.hash;
+        okW = bw.length === BAKED.worker.bytes && fnv1a(bw) === BAKED.worker.hash;
+      }
+      var good = okP && okW;
+      var nb = new TextEncoder().encode(SELF).length;
+      mEl.innerHTML =
+        '<span>whole-page snapshot</span>' +
+        '<span>' + fmt(nb) + ' bytes</span>' +
+        '<span>' + fmt(SELF.length) + ' chars</span>' +
+        '<span class="chk" style="color:' + (good ? 'var(--ok)' : 'var(--bad)') + '">' +
+        (good ? 'verified — a copy of this page carries both files byte-exact' : 'MISMATCH — do not copy this page') +
+        '</span>';
+    } catch (e) {
+      mEl.innerHTML = '<span class="chk" style="color:var(--bad)">self-check failed here — use Save the page file instead</span>';
+    }
+  })();
+
+  (function selfButtons() {
+    el('sCopy').addEventListener('click', function () {
+      var done = function () {
+        toast('Copied the whole page — ' + fmt(SELF.length) + ' characters. Paste into a notes app and save as zai-copier.html.');
+      };
+      var fallback = function () {
+        try {
+          el('detSelf').open = true;
+          selfTa.focus();
+          selfTa.setSelectionRange(0, selfTa.value.length);
+          var ok = document.execCommand('copy');
+          if (ok) done();
+          else toast('Selection is ready — long-press inside the code, then choose Copy.');
+        } catch (e) {
+          toast('Selection is ready — long-press inside the code, then choose Copy.');
+        }
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(SELF).then(done, fallback);
+      } else {
+        fallback();
+      }
+    });
+
+    el('sSave').addEventListener('click', function () {
+      try {
+        var blob = new Blob([SELF], { type: 'text/html;charset=utf-8' });
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = 'zai-copier.html';
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(function () { a.remove(); URL.revokeObjectURL(url); }, 5000);
+        toast('Saving zai-copier.html — check your Downloads.');
+      } catch (e) {
+        toast('Save failed here — use Copy and paste it into a notes app instead.');
+      }
+    });
+
+    el('sSel').addEventListener('click', function () {
+      el('detSelf').open = true;
+      selfTa.focus();
+      selfTa.setSelectionRange(0, selfTa.value.length);
+      toast('Selected all ' + fmt(SELF.length) + ' characters — long-press and Copy.');
+    });
+  })();
+
+  function setup(key, taId, metaId, copyId, saveId, selId, detId, mime) {
+    var m = BAKED.pocket;
+    if (key !== 'pocket') m = BAKED.worker;
+    var ta = el(taId);
+    var text = ta.value;
+    var metaEl = el(metaId);
+
+    if (!text || text.length < 100) {
+      metaEl.innerHTML = '<span class="chk" style="color:var(--bad)">embedded file missing — this copy of the copier is damaged, get a fresh copy of the page</span>';
+      return;
+    }
+
+    var bytes = new TextEncoder().encode(text);
+    var hash = fnv1a(bytes);
+    var lines = text.split('\n').length;
+    var good = hash === m.hash && bytes.length === m.bytes &&
+               text.length === m.chars && lines === m.lines;
+
+    metaEl.innerHTML =
+      '<span>' + m.name + '</span>' +
+      '<span>' + fmt(m.bytes) + ' bytes</span>' +
+      '<span>' + fmt(m.chars) + ' chars</span>' +
+      '<span>' + fmt(m.lines) + ' lines</span>' +
+      '<span class="chk">checksum ' + m.hash + '</span>' +
+      '<span class="chk" style="color:' + (good ? 'var(--ok)' : 'var(--bad)') + '">' +
+      (good ? 'intact — byte-exact' : 'MISMATCH — do not use this copy') + '</span>';
+
+    el(copyId).addEventListener('click', function () {
+      var done = function () {
+        toast('Copied ' + fmt(text.length) + ' characters. ' +
+          (key === 'pocket'
+            ? 'Paste into a notes app and save as zai-pocket.html.'
+            : 'Paste into the Cloudflare editor, then Save and Deploy.'));
+      };
+      var fallback = function () {
+        try {
+          el(detId).open = true;
+          ta.focus();
+          ta.setSelectionRange(0, ta.value.length);
+          var ok = document.execCommand('copy');
+          if (ok) done();
+          else toast('Selection is ready — long-press inside the code, then choose Copy.');
+        } catch (e) {
+          toast('Selection is ready — long-press inside the code, then choose Copy.');
+        }
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, fallback);
+      } else {
+        fallback();
+      }
+    });
+
+    el(saveId).addEventListener('click', function () {
+      try {
+        var blob = new Blob([text], { type: mime + ';charset=utf-8' });
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = m.name;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(function () { a.remove(); URL.revokeObjectURL(url); }, 5000);
+        toast('Saving ' + m.name + ' — check your Downloads.');
+      } catch (e) {
+        toast('Save failed here — use Copy and paste it into a notes app instead.');
+      }
+    });
+
+    el(selId).addEventListener('click', function () {
+      el(detId).open = true;
+      ta.focus();
+      ta.setSelectionRange(0, ta.value.length);
+      toast('Selected all ' + fmt(text.length) + ' characters — long-press and Copy.');
+    });
+  }
+
+  setup('pocket', 'codePocket', 'metaPocket', 'pCopy', 'pSave', 'pSel', 'detPocket', 'text/html');
+  setup('worker', 'codeWorker', 'metaWorker', 'wCopy', 'wSave', 'wSel', 'detWorker', 'text/javascript');
+})();
+</script></body></html>
