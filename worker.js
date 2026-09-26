@@ -83,7 +83,7 @@
  *     them as x-cookie. Nothing is stored at this origin.
  * ============================================================ */
 
-const VERSION = 'zp service 5.0';
+const VERSION = 'zp service 6.0';
 
 /* z.ai first-party family (suffix match — covers subdomains) */
 const ALLOW = [
@@ -131,6 +131,19 @@ function decTok(t) {
 
 function tokPath(absUrl) {
   try { return '/__t/' + encTok(absUrl); } catch (e) { return null; }
+}
+
+/* v6: path-preserving origin-token form — '/__o/<encTok(origin)><path><search>'.
+ * Relative URL resolution (dynamic import("./chunk.js"), css url(),
+ * <base>-resolved runtime urls) needs the upstream PATH to ride along
+ * in cleartext; the HOSTNAME — what org filters key on — stays encrypted. */
+function oTokPath(absUrl) {
+  try {
+    const u = new URL(absUrl);
+    const ot = encTok(u.origin);
+    if (!ot) return null;
+    return '/__o/' + ot + u.pathname + u.search;
+  } catch (e) { return null; }
 }
 
 /* upstream origin for the /chat route (env CHAT_UPSTREAM overrides, e.g. for staging) */
@@ -232,29 +245,38 @@ const PATCH_JS = [
 "   * scripts to __zaiLoc.<prop>. Reads answer the REAL upstream URL",
 "   * (SPA routers hydrate as if the page lived at chat.z.ai); the href",
 "   * setter (and assign/replace/reload) turn navigations into nav()",
-"   * postMessages instead of steering the sandbox frame anywhere. */",
+"   * postMessages instead of steering the sandbox frame anywhere.",
+"   * v6: the underlying URL is MUTABLE \u2014 the pushState/replaceState",
+"   * shims advance it (below) so a router that re-reads",
+"   * window.location.pathname after an SPA transition sees the NEW",
+"   * path, exactly like the real location object. A frozen fake was why",
+"   * chat.z.ai/auth rendered the HOME view: the URL bar moved but the",
+"   * router's own re-resolution still read \"/\". */",
+"  var LOC = { u: null };",
+"  try { LOC.u = DOC ? new URL(DOC) : null; } catch (eLoc0) { LOC.u = null; }",
+"  function setLoc(abs) {",
+"    try { LOC.u = new URL(String(abs)); } catch (eSet) { /* keep old */ }",
+"  }",
 "  function makeLoc() {",
-"    var u = null;",
-"    try { u = DOC ? new URL(DOC) : null; } catch (e) { u = null; }",
 "    function prop(name, fb) {",
-"      try { return u ? u[name] : fb; } catch (e) { return fb; }",
+"      try { return LOC.u ? LOC.u[name] : fb; } catch (e) { return fb; }",
 "    }",
 "    var loc = {};",
 "    Object.defineProperty(loc, 'href', {",
-"      get: function () { return u ? u.href : (DOC || 'about:srcdoc'); },",
+"      get: function () { return LOC.u ? LOC.u.href : (DOC || 'about:srcdoc'); },",
 "      set: function (v) { nav(v); return v; },",
 "      configurable: true",
 "    });",
 "    loc.assign = function (v) { nav(v); };",
 "    loc.replace = function (v) { nav(v); };",
 "    loc.reload = function () { up({ type: 'reloadreq' }); };",
-"    loc.toString = function () { return u ? u.href : (DOC || 'about:srcdoc'); };",
+"    loc.toString = function () { return LOC.u ? LOC.u.href : (DOC || 'about:srcdoc'); };",
 "    ['origin', 'protocol', 'host', 'hostname', 'port', 'pathname', 'search', 'hash'].forEach(function (k) {",
 "      try {",
 "        Object.defineProperty(loc, k, {",
 "          get: function () {",
-"            if (!u) return k === 'origin' || k === 'host' || k === 'hostname' ? '' : (k === 'protocol' ? 'https:' : (k === 'pathname' ? '/' : ''));",
-"            return u[k];",
+"            if (!LOC.u) return k === 'origin' || k === 'host' || k === 'hostname' ? '' : (k === 'protocol' ? 'https:' : (k === 'pathname' ? '/' : ''));",
+"            return LOC.u[k];",
 "          },",
 "          configurable: true",
 "        });",
@@ -378,7 +400,7 @@ const PATCH_JS = [
 "    if (!p) return false;",
 "    if (hasPfx(p)) return true;",
 "    if (isCrossHostPath(p)) return true;",
-"    if (/^\\/__t\\//.test(p)) return true; // v4 opaque token path",
+"    if (/^\\/__(t|o)\\//.test(p)) return true; // v4/v6 token paths (full-URL / origin+path)",
 "    if (/^\\/__(status|clear)([\\/?#]|$)/.test(p)) return true;",
 "    return false;",
 "  }",
@@ -456,7 +478,7 @@ const PATCH_JS = [
 "         * /p/<host>/ path, a worker meta route) pass through untouched \u2014",
 "         * hasPfx() alone would swallow EVERYTHING when PFX is ''. */",
 "        if (TOK && DOC) {",
-"          if (/^\\/__t\\//.test(str)) return str;",
+"          if (/^\\/__(t|o)\\//.test(str)) return str;",
 "          if (isCrossHostPath(str)) return str;",
 "          if (/^\\/__(status|clear|diag)([\\/?#]|$)/.test(str)) return str;",
 "          try {",
@@ -466,7 +488,7 @@ const PATCH_JS = [
 "        }",
 "        if (hasPfx(str)) return str;          // already carries this doc's proxy prefix",
 "        if (isCrossHostPath(str)) return str; // already a legacy /p/<host>/ proxy path",
-"        if (/^\\/__t\\//.test(str)) return str; // already an opaque token path",
+"        if (/^\\/__(t|o)\\//.test(str)) return str; // already a token path (v4 /__t/ or v6 /__o/)",
 "        return PFX + str;",
 "      }",
 "      if (TOK && DOC && !/^[a-z][a-z0-9+.-]*:/i.test(str)) {",
@@ -776,13 +798,21 @@ const PATCH_JS = [
 "         * cross-origin to about:srcdoc) and would kill the SPA. Treat it",
 "         * as a SOFT transition: tell the shell the new URL (worker path +",
 "         * upstream URL) \u2014 it updates its history entry and address bar;",
-"         * the app renders the transition client-side exactly as built. */",
+"         * the app renders the transition client-side exactly as built.",
+"         * v6: ALSO advance the fake location \u2014 routers re-read",
+"         * window.location.pathname to re-resolve routes after SPA",
+"         * transitions; a frozen fake made every soft transition land",
+"         * back on the boot route (the /auth-renders-home bug). */",
 "        try {",
 "          var su = (arguments.length > 2 && arguments[2] != null) ? String(arguments[2]) : '';",
 "          if (su && su.charAt(0) !== '#') {",
 "            var sAbs = '';",
-"            try { sAbs = new URL(su, DOC || 'about:srcdoc').href; } catch (eA) { sAbs = su; }",
+"            try { sAbs = new URL(su, LOC.u || DOC || 'about:srcdoc').href; } catch (eA) { sAbs = su; }",
+"            setLoc(sAbs);",
 "            up({ type: 'hist', url: mapUrl(sAbs), up: sAbs });",
+"          } else if (su && su.charAt(0) === '#') {",
+"            /* hash-only push: the path stays, the hash moves */",
+"            try { setLoc(String(LOC.u ? LOC.u.href : (DOC || '/')).replace(/#.*$/, '') + su); } catch (eHh) { /* ignore */ }",
 "          }",
 "        } catch (eH) { /* ignore */ }",
 "        reportNav();",
@@ -797,8 +827,11 @@ const PATCH_JS = [
 "          var ru = (arguments.length > 2 && arguments[2] != null) ? String(arguments[2]) : '';",
 "          if (ru && ru.charAt(0) !== '#') {",
 "            var rAbs = '';",
-"            try { rAbs = new URL(ru, DOC || 'about:srcdoc').href; } catch (eB) { rAbs = ru; }",
+"            try { rAbs = new URL(ru, LOC.u || DOC || 'about:srcdoc').href; } catch (eB) { rAbs = ru; }",
+"            setLoc(rAbs);",
 "            up({ type: 'hist', url: mapUrl(rAbs), up: rAbs, replace: true });",
+"          } else if (ru && ru.charAt(0) === '#') {",
+"            try { setLoc(String(LOC.u ? LOC.u.href : (DOC || '/')).replace(/#.*$/, '') + ru); } catch (eRh) { /* ignore */ }",
 "          }",
 "        } catch (eH2) { /* ignore */ }",
 "        reportNav();",
@@ -1009,9 +1042,21 @@ const PATCH_JS = [
 "        try {",
 "          var f = e.target;",
 "          if (!f || !f.getAttribute) return;",
+"          /* ALWAYS preventDefault: a native submission would navigate",
+"           * the sandbox frame (straight into the org filter). */",
 "          e.preventDefault();",
 "          var action = f.getAttribute('action') || '';",
-"          var dest = action || curUrl();",
+"          /* v6: SPA-managed forms (NO action attribute \u2014 the app's own",
+"           * onsubmit handler owns the submit: captcha flows, fetch-based",
+"           * logins, search boxes) must be LEFT ALONE. v5 serialized EVERY",
+"           * form into a GET/POST navigation \u2014 which hijacked the z.ai",
+"           * login form (email+password folded into the URL as a QUERY",
+"           * STRING!), swapped the document, and killed the app's own",
+"           * captcha\u2192signin chain: the \"sign-in buttons do nothing\"",
+"           * symptom. Only forms that actually target a server endpoint",
+"           * (a real action) become shell navigations. */",
+"          if (!action || action === '#' || action.charAt(0) === '#' || /^javascript:/i.test(action)) return;",
+"          var dest = action;",
 "          if (isWorkerUrl(dest)) {",
 "            /* the action was already rewritten to the worker origin \u2014",
 "             * navigate straight to it (the shell strips the origin) */",
@@ -1458,6 +1503,29 @@ const PATCH_JS = [
 "          if (d.url) location.href = mapUrl(String(d.url));",
 "          break;",
 "        case 'getstate': reportNav(); break;",
+"        case 'probe':",
+"          /* v6 debug channel: the shell (or a test) asks, the frame answers",
+"           * with the state the app actually sees. Used for diagnosing",
+"           * captcha/login flows inside the opaque sandbox. */",
+"          try {",
+"            var pScripts = [];",
+"            try {",
+"              var pList = document.querySelectorAll('script[src]');",
+"              for (var pi = 0; pi < pList.length && pi < 14; pi++) pScripts.push(pList[pi].getAttribute('src'));",
+"            } catch (eSl) { /* ignore */ }",
+"            up({",
+"              type: 'probe',",
+"              doc: DOC || '',",
+"              locHref: (window.__zaiLoc && window.__zaiLoc.href) || '',",
+"              realHref: (function () { try { return location.href; } catch (eR) { return '(throws)'; } })(),",
+"              initAliyun: typeof window.initAliyunCaptcha,",
+"              aliCfg: typeof window.AliyunCaptchaConfig === 'object' ? 'set' : 'unset',",
+"              scripts: pScripts,",
+"              forms: (function () { var n = 0; try { n = document.querySelectorAll('form').length; } catch (eF) { } return n; })(),",
+"              title: document.title || ''",
+"            });",
+"          } catch (eP) { /* ignore */ }",
+"          break;",
 "      }",
 "    } catch (err) { /* ignore */ }",
 "  });",
@@ -1475,6 +1543,23 @@ const PATCH_JS = [
 "  /* ---------- boot ---------- */",
 "  up({ type: 'hello', url: curUrl(), title: document.title || '' });",
 "  reportNav();",
+"  /* ---------- v6: boot diagnostic (the shell logs this; ZAI-MSG probes read it) ----------",
+"   * Reports what the app's location reads will answer during THIS boot:",
+"   * the fake location the router hydrates against, plus the real frame",
+"   * URL for comparison. Cheap, quiet, and it settles routing questions",
+"   * without cross-origin DOM access. */",
+"  try {",
+"    setTimeout(function () {",
+"      up({",
+"        type: 'bootdiag',",
+"        doc: DOC || '',",
+"        fakeHref: (window.__zaiLoc && window.__zaiLoc.href) || '',",
+"        fakePath: (window.__zaiLoc && window.__zaiLoc.pathname) || '',",
+"        realHref: (function () { try { return location.href; } catch (e) { return '(throws)'; } })(),",
+"        title: document.title || ''",
+"      });",
+"    }, 2500);",
+"  } catch (eDiag) { /* ignore */ }",
 "})();",
 ""
 ].join("\n");
@@ -1587,7 +1672,10 @@ async function handle(req, event) {
     let tokMode = false; // this request came through /__t/<token>
 
     if (url.pathname.startsWith('/__t/')) {
-      /* v4/v5 opaque token: the ONLY form content URLs take now */
+      /* v4/v5 opaque token (full absolute URL). Still the form for the
+       * entry boot handle and every URL the runtime patch maps at run
+       * time (fetch/XHR paths — no relative resolution happens against
+       * those). */
       const tok = url.pathname.slice(5);
       const dec = decTok(tok);
       if (!dec || !/^https?:\/\//i.test(dec)) {
@@ -1600,6 +1688,29 @@ async function handle(req, event) {
       host = du.host;
       pfx = '';
       upstream = du.toString();
+      tokMode = true;
+    } else if (url.pathname.startsWith('/__o/')) {
+      /* v6 path-preserving origin token: '/__o/<otok>/<upstream path>'.
+       * Everything the worker embeds in HTML/CSS/redirect Locations uses
+       * this form so RELATIVE references (dynamic import(), css url(),
+       * <base>-resolved runtime URLs) resolve to worker URLs that still
+       * carry the upstream path — the module-chunk 400 bug is dead. */
+      const rest0 = url.pathname.slice(5);
+      const slash = rest0.indexOf('/');
+      const otok = slash < 0 ? rest0 : rest0.slice(0, slash);
+      const upath = slash < 0 ? '/' : rest0.slice(slash);
+      const dec = decTok(otok);
+      if (!otok || !dec || !/^https?:\/\/[a-z0-9.:-]+\/?$/i.test(dec)) {
+        return json({ error: 'bad origin token' }, req, 400);
+      }
+      const origin = dec.replace(/\/+$/, '');
+      const ou = new URL(origin + '/');
+      if (!hostAllowed(ou.host, event)) {
+        return json({ error: 'host not allowed', allowed_suffixes: allowList(event) }, req, 403);
+      }
+      host = ou.host;
+      pfx = '';
+      upstream = origin + upath + url.search;
       tokMode = true;
     } else if (url.pathname.startsWith('/p/')) {
       const rest = url.pathname.slice(3); // "<host>/path..."
@@ -1872,11 +1983,28 @@ function reissueCookies(res, h, event) {
 }
 
 function corsHeaders(req, h) {
-  h.set('access-control-allow-origin', '*');
+  /* v6: credentialed CORS. The z.ai app calls EVERY api with
+   * credentials:"include" — and a browser REFUSES
+   * Access-Control-Allow-Origin:* on credentialed cross-origin fetches,
+   * which silently killed signin / chat-send inside the sandbox while
+   * the worker happily logged 200s. Echo the origin back — browsers
+   * send "null" for both the saved file:// pocket and its sandboxed
+   * srcdoc frame — plus allow-credentials so cookies actually flow.
+   * Anything else (random websites) keeps the wildcard WITHOUT
+   * credentials. */
+  const org = (req.headers.get('origin') || '').trim();
+  let self = '';
+  try { self = new URL(req.url).origin; } catch (e) { /* ignore */ }
+  if (org && (org === 'null' || org === self)) {
+    h.set('access-control-allow-origin', org);
+    h.set('access-control-allow-credentials', 'true');
+  } else {
+    h.set('access-control-allow-origin', '*');
+  }
   h.set('access-control-allow-methods', 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS');
   const reqH = req.headers.get('access-control-request-headers');
   h.set('access-control-allow-headers', reqH || '*');
-  h.set('access-control-expose-headers', 'content-disposition, content-type, x-set-cookie, x-final-url, filename, x-zp-retry');
+  h.set('access-control-expose-headers', 'content-disposition, content-type, x-set-cookie, x-final-url, filename, x-zp-retry, x-zp-jsrw');
   h.set('access-control-max-age', '86400');
   return h;
 }
@@ -2043,11 +2171,12 @@ function mapLocation(loc, upUrl, event, tokMode) {
     if (abs.protocol !== 'https:' && abs.protocol !== 'http:') return loc;
     if (!hostAllowed(abs.host, event)) return loc; // external redirect — pass through untouched
     if (tokMode) {
-      /* this response came from a /__t/<token> request — there is no
-       * path prefix and (v5) no transparent root anymore: EVERY
-       * allowed target becomes a token, same-host or not, so the
-       * fetching shell can follow it without hitting a neutral 404. */
-      return tokPath(abs.toString());
+      /* this response came from a /__t/ or /__o/ request — there is no
+       * path prefix and (v5) no transparent root anymore: EVERY allowed
+       * target becomes a worker handle. v6 uses the path-preserving
+       * /__o/ form so the destination keeps resolving relatives right. */
+      const op = oTokPath(abs.toString());
+      return op || tokPath(abs.toString());
     }
     if (abs.host === upUrl.host) {
       const pfx = prefixForHost(upUrl.host, event);
@@ -2086,8 +2215,13 @@ function mapAttr(v, pfx, host, allow, tokDoc, workerOrigin) {
       if (abs.protocol !== 'https:' && abs.protocol !== 'http:') return v;
       const ok = allow.some((a) => abs.host === a || abs.host.endsWith('.' + a));
       if (!ok) return v;
-      const tp = tokPath(abs.toString());
-      return tp ? (workerOrigin ? workerOrigin.replace(/\/$/, '') + tp : tp) : v;
+      /* v6: /__o/ path-preserving form (absolute). The upstream PATH
+       * rides along so relative references against this URL — dynamic
+       * import() of sibling chunks above all — resolve to worker URLs
+       * that reconstruct the right upstream file. The /__t/ full-token
+       * form made "./chunk.js" resolve to /__t/chunk.js -> 400. */
+      const op = oTokPath(abs.toString());
+      return op ? (workerOrigin ? workerOrigin.replace(/\/$/, '') + op : op) : v;
     }
     let m;
     if ((m = s.match(/^https?:\/\/([^\/?#]+)/i))) {
@@ -2163,10 +2297,23 @@ function rewriteHtml(text, pfx, host, workerOrigin, token, allow, tokDoc) {
       return pre + '"' + nv.replace(/"/g, '&quot;') + '"';
     });
 
-    /* inject config + runtime patch as the first script */
+    /* inject config + runtime patch as the first script; v6 also injects
+     * a <base> pointing at this document's /__o/ mirror — the sandbox
+     * document sits at about:srcdoc where relative URLs resolve against
+     * NOTHING, so runtime-created refs (img.src = "foo.png", dynamic
+     * import("./chunk.js") inside inline scripts, form submits without
+     * actions) would all die. With <base> they resolve onto the worker,
+     * path-preserved. The runtime's document.baseURI override still
+     * reports the upstream URL to the app, so routers hydrate right. */
     const cfg = { pfx: pfx, host: host, worker: workerOrigin, token: token || '', allow: allow,
       key: TOK_KEY, tok: !!tokDoc, doc: tokDoc || '', sd: !!tokDoc };
-    const inject = '<scr' + 'ipt>window.__ZAI__=' + JSON.stringify(cfg) + ';' + PATCH_JS + '</scr' + 'ipt>';
+    let inject = '<scr' + 'ipt>window.__ZAI__=' + JSON.stringify(cfg) + ';' + PATCH_JS + '</scr' + 'ipt>';
+    if (tokDoc) {
+      try {
+        const bOp = oTokPath(tokDoc);
+        if (bOp) inject = '<base href="' + (workerOrigin ? workerOrigin.replace(/\/$/, '') : '') + bOp + '">' + inject;
+      } catch (eB) { /* ignore */ }
+    }
     if (/<head[^>]*>/i.test(text)) text = text.replace(/<head[^>]*>/i, (m) => m + inject);
     else if (/<html[^>]*>/i.test(text)) text = text.replace(/<html[^>]*>/i, (m) => m + inject);
     else text = inject + text;
