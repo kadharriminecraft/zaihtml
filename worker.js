@@ -1,98 +1,89 @@
 /* ============================================================
- * z.ai pocket — Cloudflare Worker reverse proxy (v3)
+ * z.ai pocket — Cloudflare Worker relay (v5)
  * ------------------------------------------------------------
- * WHAT THIS DOES
- *   Open THIS WORKER'S URL in your phone browser — that URL is
- *   the app. The worker serves the real chat.z.ai full-screen
- *   (no iframe, no local HTML file). Every request the site
- *   makes (HTML, JS/CSS assets, API calls, SSE streams,
- *   uploads, downloads, websockets) is answered by THIS worker,
- *   which forwards it to the z.ai family of hosts. The browser
- *   never talks to z.ai directly.
+ * WHAT THIS DOES (v5 — the "no-navigation" architecture)
+ *   The phone's browser NEVER opens this worker as a web page.
+ *   The saved pocket file (zai-pocket.html) is the app shell: it
+ *   FETCHES every document, script, stylesheet and API call
+ *   through this worker with plain CORS fetch() — nothing ever
+ *   navigates to the worker origin — and paints the app inside a
+ *   locked null-origin sandbox frame in the file itself.
+ *   Organization web filters intercept NAVIGATIONS (that is the
+ *   "blocked by your organization" page); fetch() calls from a
+ *   saved local file sail past them. This is the same concept the
+ *   Relay "super worker" uses, rebuilt custom for z.ai.
  *
- * v3 CHANGES — fixes "opens straight to a blocked page"
- *   1. Cloudflare-edge headers that arrive on every request
- *      hitting this worker (cf-connecting-ip, cf-ipcountry,
- *      cf-ray, cf-visitor, x-forwarded-for, cdn-loop,
- *      true-client-ip, ...) are NO LONGER forwarded upstream.
- *      chat.z.ai is itself behind Cloudflare, and handing it
- *      forged CF headers is classic WAF bait: some regions
- *      answer with a block page.
- *   2. If z.ai still answers 403/429 on a GET, the worker
- *      retries ONCE with a minimal clean header set before it
- *      gives up (successful retries are tagged x-zp-retry: 1).
- *   3. New public /__diag page — open it on the phone and it
- *      shows, live, what z.ai returns for this worker: three
- *      probes (browser-like / minimal / the old v2 forged-header
- *      way) with status, colo and body preview, plus what this
- *      worker received from your network. If z.ai is blocking,
- *      this page says so in plain words.
+ *   On top of that, the worker's own root serves only a small
+ *   neutral status page — never z.ai content — so the hostname
+ *   can never be content-classified as an AI-chatbot site, and
+ *   every upstream URL stays an opaque /__t/<token> (v4 scheme).
  *
- * v4 CHANGES — fixes "my organization blocks it"
- *   Organization content filters read the URL of EVERY request the
- *   phone makes and category-block hostnames found in them (z.ai,
- *   chatglm.cn, alicdn …). v3 addressed cross-host URLs as
- *   /p/<host>/… paths — the hostname stayed fully READABLE inside
- *   the request URL, so those subresources died and the app showed
- *   the organization's block page.
- *   v4 ports the SCP-worker concept to z.ai: every cross-host URL —
- *   in HTML attributes, CSS url()/@import, redirects, and the
- *   runtime patch's fetch/XHR/WebSocket/EventSource mapping —
- *   becomes an OPAQUE TOKEN /__t/<gibberish>: the absolute upstream
- *   URL XOR-encrypted + base64url'd. NO request the phone makes
- *   carries a readable upstream hostname anymore. The token key is
- *   injected into the runtime patch (window.__ZAI__.key) so the
- *   browser tokenizes runtime-built URLs with the same scheme.
- *   The pocket app file (zai-pocket.html) now also ships a SANDBOXED
- *   in-file app view: the app runs inside a sandboxed iframe in the
- *   saved file itself, every byte still flowing through this worker.
+ * HISTORY
+ *   v3 — dropped Cloudflare-edge headers before forwarding (WAF
+ *        bait), added the one-shot 403/429 clean retry, /__diag.
+ *   v4 — opaque tokens for every cross-host URL in HTML/CSS/
+ *        redirects/runtime mapping: no readable upstream hostname
+ *        in any request the phone makes.
+ *   v5 — THE BIG ONE: sandbox-first serving. (1) Root and every
+ *        bare path answer a neutral page/JSON — the transparent
+ *        chat.z.ai catch-all is GONE, so nothing at this origin
+ *        looks like z.ai to a classifier. (2) Documents served
+ *        through /__t/<token> now carry cfg.sd (sandbox mode):
+ *        the injected runtime patch boots a fake location object
+ *        (__zaiLoc) whose reads report the REAL upstream URL and
+ *        whose writes postMessage the shell instead of navigating
+ *        the frame. (3) Served JavaScript gets a conservative
+ *        location-assignment rewrite (location.href = X →
+ *        __zaiLoc.href = X etc.) so SPA redirects never navigate
+ *        the sandbox frame. (4) /__status gains "entry": the
+ *        tokenized root-document path, so the pocket file can
+ *        boot the app without knowing the token key.
  *
  * DEPLOY (you already have a worker)
  *   1. dash.cloudflare.com → Workers & Pages → your worker
  *   2. "Edit code" / Quick Edit → select all → paste this file
  *   3. Save & Deploy
  *   4. (optional) Settings → Variables → PROXY_TOKEN with a long
- *      random string (then / asks for it once) and/or
- *      EXTRA_HOSTS="a.com,b.com" to allowlist more first-party
- *      hosts.
- *   5. Open the worker URL — that IS the app. The zai-pocket.html
- *      file already saved on your phone keeps working unchanged
- *      (it only talks to /__status, which is unchanged).
- *      If the app ever shows a blocked or error page, open
- *      https://<your-worker>/__diag and read what it says.
+ *      random string, and/or EXTRA_HOSTS="a.com,b.com" to
+ *      allowlist more first-party hosts.
+ *   5. Save the new zai-pocket.html on the phone and use its
+ *      "Open Z.ai (sandboxed)" button — the app streams into the
+ *      file through this worker. Do NOT open the worker URL in
+ *      the browser; it is only a relay now.
  *
  * ROUTES
- *   /            -> https://chat.z.ai/   — the app itself,
- *                    full-screen, no prefix (the SPA only works
- *                    at "/"; on /chat/ it renders its own error
- *                    page). With PROXY_TOKEN set and unsatisfied,
- *                    / shows the token setup page.
- *   /chat/*      -> 302 to /*            (legacy v2 prefix)
- *   /__t/<token> -> https://<upstream-url>  (v4 OPAQUE TOKEN route:
- *                    the token is the absolute upstream URL
- *                    XOR-encrypted + base64url'd — no readable
- *                    upstream hostname in any request; used for ALL
- *                    cross-host URLs the app references)
- *   /p/<host>/*  -> https://<host>/*     (legacy v3 form — still
- *                    accepted for stale caches, never emitted now)
- *   anything else -> https://chat.z.ai/<path> (transparent
- *                    catch-all: runtime-built root-absolute URLs
- *                    like /static/logo.png behave like on the
- *                    real site)
- *   /__status    -> health-check JSON (the pocket file uses this)
- *   /__diag      -> live upstream probe report (see v3 notes)
- *   /__clear     -> wipe all session cookies, back to /
+ *   /            -> neutral service page (token setup form when
+ *                   PROXY_TOKEN is set). NEVER z.ai content.
+ *   /__t/<token> -> https://<upstream-url>   the ONLY content
+ *                   route: opaque token = absolute upstream URL
+ *                   XOR-encrypted + base64url'd. CORS-open for
+ *                   every origin (the pocket file fetches it),
+ *                   every method, cookies relayed via x-set-cookie
+ *                   + x-cookie, final URL reported as x-final-url.
+ *   /__status    -> health-check JSON + "entry" (the tokenized
+ *                   root document path — the pocket file's app
+ *                   boot handle). Neutral: no z.ai strings.
+ *   /__diag      -> live upstream probe report (three probes,
+ *                   plain-English verdict).
+ *   /__clear     -> expire session cookies, back to /
+ *   /favicon.ico -> 204 (neutral — never a proxied page)
+ *   /p/<host>/*  -> legacy v3 form, still accepted for stale
+ *                   caches, never emitted.
+ *   anything else (bare path) -> neutral 404 JSON. The transparent
+ *                   chat.z.ai mirroring is GONE in v5: the phone
+ *                   never navigates here, so it serves nothing.
  *
  * SECURITY
  *   - Only z.ai / chatglm.cn / chatglm.site family hosts are
  *     proxied. This is NOT an open proxy.
  *   - With PROXY_TOKEN set, everything except the token page,
  *     /__status and /__diag requires the token.
- *   - Upstream cookies are re-issued for this worker's own domain
- *     so the whole app is one same-origin page; sessions stick.
+ *   - Upstream set-cookies are relayed to the sandbox runtime via
+ *     the CORS-exposed x-set-cookie header; the runtime replays
+ *     them as x-cookie. Nothing is stored at this origin.
  * ============================================================ */
 
-const VERSION = 'zai-pocket-proxy 4.0';
+const VERSION = 'zp service 5.0';
 
 /* z.ai first-party family (suffix match — covers subdomains) */
 const ALLOW = [
@@ -183,10 +174,131 @@ const PATCH_JS = [
 "  var KEY = CFG.key || '';            // v4 opaque-token key (shared with the worker)",
 "  var TOK = !!CFG.tok;                // true when this doc was served through /__t/<token>",
 "  var DOC = CFG.doc || '';            // that token's absolute upstream URL (TOK mode)",
+"  var SD = !!CFG.sd;                  // v5: sandbox mode \u2014 this document is being",
+"                                      // painted into a null-origin srcdoc frame by",
+"                                      // the pocket shell. NEVER navigate: every",
+"                                      // destination goes to the shell by postMessage.",
 "",
 "  var jar = [];                       // fallback cookie jar (mirrored by the shell)",
 "  var lsMirror = {};                  // fallback localStorage mirror (for browsers that block it in iframes)",
 "  var upQueue = [];",
+"",
+"  /* ---------- v5: absolute worker URLs --------------------------------",
+"   * Inside the sandbox frame the document sits at about:srcdoc, so a",
+"   * mapped path like /__t/<token> is unresolvable on its own \u2014 it must",
+"   * be absolutized against the worker origin for fetch/XHR/ES/beacons. */",
+"  function absW(p) {",
+"    try {",
+"      if (!SD || typeof p !== 'string' || !/^\\//.test(p)) return p;",
+"      return WORKER.replace(/\\/$/, '') + p;",
+"    } catch (e) { return p; }",
+"  }",
+"",
+"  /* ---------- v5: is this URL the WORKER's own (already proxied)? ------",
+"   * The worker rewrites HTML attrs into ABSOLUTE worker URLs",
+"   * (https://worker/__t/\u2026). Those are NOT \"external\" \u2014 but the",
+"   * allowlist only knows upstream hosts, so every nav branch must",
+"   * recognize worker-origin URLs FIRST or it would eat them as",
+"   * outside-the-proxy links (the auto-submit E2E caught exactly that:",
+"   * a rewritten form action dropped as \"external\"). */",
+"  function isWorkerUrl(u) {",
+"    try {",
+"      if (!SD || !WORKER) return false;",
+"      var s = String(u || '');",
+"      var w = WORKER.replace(/\\/$/, '');",
+"      return s === w || s.indexOf(w + '/') === 0 || s.indexOf(w.replace(/^http/, 'ws')) === 0;",
+"    } catch (e) { return false; }",
+"  }",
+"",
+"  /* ---------- v5: navigation request to the shell ---------------------",
+"   * nav(u) sends the shell everything it needs to re-render the app at",
+"   * a new URL as a FRESH sandboxed document: the worker path to fetch",
+"   * (tokenized here \u2014 the shell has no key) and the upstream URL for",
+"   * its address bar / history entry. POST navigations (form submits)",
+"   * carry method/body/content-type too. */",
+"  function nav(u, method, body, ct) {",
+"    try {",
+"      var s = (u == null) ? '' : String(u);",
+"      var mapped = mapUrl(s);",
+"      var upUrl = '';",
+"      try { upUrl = new URL(s, DOC || location.href).href; } catch (eU) { upUrl = s; }",
+"      up({ type: 'navreq', url: mapped, up: upUrl, method: method || 'GET', body: body || null, ct: ct || null });",
+"      return s;",
+"    } catch (e) { return u; }",
+"  }",
+"",
+"  /* ---------- v5: fake location (window.__zaiLoc) ---------------------",
+"   * The worker's JS pass rewrites location.<prop> tokens in served",
+"   * scripts to __zaiLoc.<prop>. Reads answer the REAL upstream URL",
+"   * (SPA routers hydrate as if the page lived at chat.z.ai); the href",
+"   * setter (and assign/replace/reload) turn navigations into nav()",
+"   * postMessages instead of steering the sandbox frame anywhere. */",
+"  function makeLoc() {",
+"    var u = null;",
+"    try { u = DOC ? new URL(DOC) : null; } catch (e) { u = null; }",
+"    function prop(name, fb) {",
+"      try { return u ? u[name] : fb; } catch (e) { return fb; }",
+"    }",
+"    var loc = {};",
+"    Object.defineProperty(loc, 'href', {",
+"      get: function () { return u ? u.href : (DOC || 'about:srcdoc'); },",
+"      set: function (v) { nav(v); return v; },",
+"      configurable: true",
+"    });",
+"    loc.assign = function (v) { nav(v); };",
+"    loc.replace = function (v) { nav(v); };",
+"    loc.reload = function () { up({ type: 'reloadreq' }); };",
+"    loc.toString = function () { return u ? u.href : (DOC || 'about:srcdoc'); };",
+"    ['origin', 'protocol', 'host', 'hostname', 'port', 'pathname', 'search', 'hash'].forEach(function (k) {",
+"      try {",
+"        Object.defineProperty(loc, k, {",
+"          get: function () {",
+"            if (!u) return k === 'origin' || k === 'host' || k === 'hostname' ? '' : (k === 'protocol' ? 'https:' : (k === 'pathname' ? '/' : ''));",
+"            return u[k];",
+"          },",
+"          configurable: true",
+"        });",
+"      } catch (e) { /* ignore */ }",
+"    });",
+"    return loc;",
+"  }",
+"  if (SD) {",
+"    try { window.__zaiLoc = makeLoc(); } catch (eL) { /* ignore */ }",
+"    /* document.URL / baseURI / documentURI \u2014 the parser reports",
+"     * about:srcdoc; SPA hydration wants the real upstream URL. These",
+"     * are plain accessors on Document.prototype (NOT unforgeable),",
+"     * so they can be re-pointed at the upstream doc URL. */",
+"    try {",
+"      ['URL', 'baseURI', 'documentURI'].forEach(function (k) {",
+"        Object.defineProperty(Document.prototype, k, {",
+"          get: function () { return DOC || 'about:srcdoc'; },",
+"          configurable: true",
+"        });",
+"      });",
+"    } catch (eD) { /* ignore */ }",
+"  }",
+"",
+"  /* ---------- v5: window.name boot hydration --------------------------",
+"   * The shell stamps the frame's name with a snapshot {zp:1, ls, jar}",
+"   * BEFORE assigning the srcdoc \u2014 it is readable synchronously here,",
+"   * so the app's own scripts (which run after this patch) find their",
+"   * session cookies and localStorage already populated. No race. */",
+"  try {",
+"    if (SD && window.name) {",
+"      var boot = JSON.parse(window.name);",
+"      if (boot && boot.zp === 1) {",
+"        if (boot.ls && typeof boot.ls === 'object') {",
+"          Object.keys(boot.ls).forEach(function (k) { if (!(k in lsMirror)) lsMirror[k] = String(boot.ls[k]); });",
+"        }",
+"        if (Array.isArray(boot.jar)) {",
+"          var jarMap = {};",
+"          jar.forEach(function (c) { if (c && c.name) jarMap[c.name] = c; });",
+"          boot.jar.forEach(function (c) { if (c && c.name) jarMap[c.name] = c; });",
+"          jar = Object.keys(jarMap).map(function (k) { return jarMap[k]; });",
+"        }",
+"      }",
+"    }",
+"  } catch (eN) { /* ignore */ }",
 "",
 "  /* ---------- messaging ---------- */",
 "  function up(msg) {",
@@ -281,6 +393,15 @@ const PATCH_JS = [
 "   *   re-attach inside a token document.",
 "   */",
 "  function mapUrl(u) {",
+"    /* v5 sandbox wrapper: every mapped worker path becomes ABSOLUTE",
+"     * (https://worker/__t/\u2026) because about:srcdoc has no base to",
+"     * resolve \"/__t/\u2026\" against \u2014 DOM attributes, CSS url() text, fetch",
+"     * URLs and nav postMessages all need the absolute form. absW() is",
+"     * idempotent, and in non-sandbox mode it is a no-op. */",
+"    return absW(mapUrl0(u));",
+"  }",
+"",
+"  function mapUrl0(u) {",
 "    try {",
 "      if (u == null) return u;",
 "      if (typeof u === 'object' && u instanceof URL) {",
@@ -328,15 +449,24 @@ const PATCH_JS = [
 "        return '/p/' + h2 + (str.slice(m[0].length) || '/');",
 "      }",
 "      if (str.charAt(0) === '/' && str.charAt(1) !== '/') {",
-"        if (hasPfx(str)) return str;          // already carries this doc's proxy prefix",
-"        if (isCrossHostPath(str)) return str; // already a legacy /p/<host>/ proxy path",
-"        if (/^\\/__t\\//.test(str)) return str; // already an opaque token path",
+"        /* v5 order fix: in TOK mode there IS no prefix to carry \u2014 a",
+"         * root-absolute path belongs to the DOC's upstream and MUST be",
+"         * absolutized + tokenized. But the EXPLICIT already-proxied",
+"         * forms (a token path the worker rewrote into an attr, a legacy",
+"         * /p/<host>/ path, a worker meta route) pass through untouched \u2014",
+"         * hasPfx() alone would swallow EVERYTHING when PFX is ''. */",
 "        if (TOK && DOC) {",
+"          if (/^\\/__t\\//.test(str)) return str;",
+"          if (isCrossHostPath(str)) return str;",
+"          if (/^\\/__(status|clear|diag)([\\/?#]|$)/.test(str)) return str;",
 "          try {",
 "            var t3 = tokPath(new URL(str, DOC).href);",
 "            if (t3) return t3;",
 "          } catch (e3) { /* fall through */ }",
 "        }",
+"        if (hasPfx(str)) return str;          // already carries this doc's proxy prefix",
+"        if (isCrossHostPath(str)) return str; // already a legacy /p/<host>/ proxy path",
+"        if (/^\\/__t\\//.test(str)) return str; // already an opaque token path",
 "        return PFX + str;",
 "      }",
 "      if (TOK && DOC && !/^[a-z][a-z0-9+.-]*:/i.test(str)) {",
@@ -352,6 +482,13 @@ const PATCH_JS = [
 "  /* ---------- cookies ---------- */",
 "  function docCookies() {",
 "    var out = [];",
+"    if (SD) {",
+"      /* v5 sandbox: document.cookie is shimmed to the memory jar below \u2014",
+"       * reads come from the jar (seeded from window.name at boot and",
+"       * refreshed by x-set-cookie on every proxied response). */",
+"      jar.forEach(function (c) { if (c && c.name && !c.del) out.push(c.name + '=' + c.value); });",
+"      return out;",
+"    }",
 "    try {",
 "      (document.cookie || '').split(';').forEach(function (kv) {",
 "        kv = kv.trim();",
@@ -406,12 +543,54 @@ const PATCH_JS = [
 "  }",
 "",
 "  function seedDocumentCookies() {",
+"    if (SD) return; /* v5 sandbox: cookies live in the memory jar only */",
 "    jar.forEach(function (c) {",
 "      try {",
 "        document.cookie = c.name + '=' + c.value + '; path=/; Max-Age=31536000; Secure; SameSite=None; Partitioned';",
 "      } catch (e) { /* ignore */ }",
 "    });",
 "  }",
+"",
+"  /* ---------- v5: document.cookie shim (sandbox mode) -----------------",
+"   * In a null-origin srcdoc frame real cookie writes go nowhere (and",
+"   * reads can throw on some engines). The instance property is",
+"   * shadowed with an in-memory jar view: reads join the jar, writes",
+"   * merge into it and are echoed to the shell so the session survives",
+"   * the next srcdoc swap. Cookie-header replay to the worker rides on",
+"   * the x-cookie header the wrappers already set. */",
+"  try {",
+"    if (SD) {",
+"      var _cookieDesc = Object.getOwnPropertyDescriptor(Document.prototype, 'cookie');",
+"      Object.defineProperty(document, 'cookie', {",
+"        get: function () { return docCookies().join('; '); },",
+"        set: function (str) {",
+"          try {",
+"            var bits = String(str).split(';');",
+"            var nv = bits[0];",
+"            var eq = nv.indexOf('=');",
+"            if (eq >= 0) {",
+"              var name = nv.slice(0, eq).trim();",
+"              var value = nv.slice(eq + 1).trim();",
+"              var del = false;",
+"              for (var i = 1; i < bits.length; i++) {",
+"                var b = bits[i].trim().toLowerCase();",
+"                if (b === 'max-age=0' || b.indexOf('expires=thu, 01 jan 1970') === 0) del = true;",
+"              }",
+"              if (name) {",
+"                var found = false;",
+"                for (var j = 0; j < jar.length; j++) {",
+"                  if (jar[j].name === name) { found = true; if (del) { jar.splice(j, 1); } else { jar[j].value = value; } break; }",
+"                }",
+"                if (!found && !del) jar.push({ name: name, value: value });",
+"                up({ type: 'cookies', cookies: jar });",
+"              }",
+"            }",
+"          } catch (eC) { /* ignore */ }",
+"        },",
+"        configurable: true",
+"      });",
+"    }",
+"  } catch (eCookieShim) { /* ignore */ }",
 "",
 "  /* ---------- header injection ---------- */",
 "  function applyHeaders(h) {",
@@ -431,11 +610,11 @@ const PATCH_JS = [
 "        if (input && typeof input === 'object' && typeof input.url === 'string' && input.constructor && input.constructor.name === 'Request') {",
 "          var mapped = mapUrl(input.url);",
 "          if (mapped !== input.url) {",
-"            try { input = new Request(mapped, input); } catch (e2) { /* keep original */ }",
+"            try { input = new Request(absW(mapped), input); } catch (e2) { /* keep original */ }",
 "          }",
 "        } else if (typeof input === 'string' || input instanceof URL) {",
 "          var u2 = mapUrl(String(input));",
-"          if (u2 !== String(input)) input = u2;",
+"          if (u2 !== String(input)) input = absW(u2);",
 "        }",
 "        init = init || {};",
 "        var H;",
@@ -460,6 +639,7 @@ const PATCH_JS = [
 "      try {",
 "        var mu = mapUrl(String(url));",
 "        if (mu !== String(url)) {",
+"          mu = absW(mu);",
 "          if (arguments.length > 2) {",
 "            arguments[1] = mu;",
 "            return _open.apply(this, arguments);",
@@ -492,7 +672,7 @@ const PATCH_JS = [
 "      var _ES = window.EventSource;",
 "      window.EventSource = function (url, cfg) {",
 "        try {",
-"          var mu = mapUrl(String(url));",
+"          var mu = absW(mapUrl(String(url)));",
 "          /* EventSource cannot set headers \u2014 carry the token in the query */",
 "          if (TOKEN && mu !== String(url) && String(mu).indexOf('__t=') < 0) {",
 "            mu += (mu.indexOf('?') < 0 ? '?' : '&') + '__t=' + encodeURIComponent(TOKEN);",
@@ -528,7 +708,10 @@ const PATCH_JS = [
 "              if (TOKEN && path.indexOf('__t=') < 0) {",
 "                path += (path.indexOf('?') < 0 ? '?' : '&') + '__t=' + encodeURIComponent(TOKEN);",
 "              }",
-"              url = (location.protocol === 'https:' ? 'wss' : scheme) + '://' + location.host + path;",
+"              /* v5 sandbox: location.host is EMPTY at about:srcdoc \u2014 the",
+"               * worker origin comes from cfg instead. */",
+"              var wOrigin = (SD && WORKER) ? WORKER : (location.protocol + '//' + location.host);",
+"              url = (wOrigin.indexOf('https:') === 0 ? 'wss' : scheme) + '://' + wOrigin.replace(/^https?:\\/\\//i, '') + path;",
 "            }",
 "          }",
 "        } catch (e) { /* ignore */ }",
@@ -548,7 +731,7 @@ const PATCH_JS = [
 "      var _sb = navigator.sendBeacon.bind(navigator);",
 "      navigator.sendBeacon = function (url, data) {",
 "        try {",
-"          var mu = mapUrl(String(url));",
+"          var mu = absW(mapUrl(String(url)));",
 "          if (mu !== String(url)) {",
 "            // beacons cannot carry custom headers; fall back to keepalive fetch",
 "            return _fetch(mu, { method: 'POST', body: data, keepalive: true, mode: 'no-cors' }) ? true : true;",
@@ -560,7 +743,10 @@ const PATCH_JS = [
 "  } catch (e) { /* ignore */ }",
 "",
 "  /* ---------- navigation reporting ---------- */",
-"  function curUrl() { return location.pathname + location.search + location.hash; }",
+"  function curUrl() {",
+"    if (SD) return DOC || 'about:srcdoc'; /* v5: the shell wants the real upstream URL */",
+"    return location.pathname + location.search + location.hash;",
+"  }",
 "  function reportNav() { up({ type: 'nav', url: curUrl(), title: document.title || '' }); }",
 "",
 "  try {",
@@ -585,10 +771,39 @@ const PATCH_JS = [
 "      } catch (e) { return u; }",
 "    }",
 "    history.pushState = function () {",
+"      if (SD) {",
+"        /* v5 sandbox: native pushState throws SecurityError (the URL is",
+"         * cross-origin to about:srcdoc) and would kill the SPA. Treat it",
+"         * as a SOFT transition: tell the shell the new URL (worker path +",
+"         * upstream URL) \u2014 it updates its history entry and address bar;",
+"         * the app renders the transition client-side exactly as built. */",
+"        try {",
+"          var su = (arguments.length > 2 && arguments[2] != null) ? String(arguments[2]) : '';",
+"          if (su && su.charAt(0) !== '#') {",
+"            var sAbs = '';",
+"            try { sAbs = new URL(su, DOC || 'about:srcdoc').href; } catch (eA) { sAbs = su; }",
+"            up({ type: 'hist', url: mapUrl(sAbs), up: sAbs });",
+"          }",
+"        } catch (eH) { /* ignore */ }",
+"        reportNav();",
+"        return undefined;",
+"      }",
 "      try { if (arguments.length > 2 && arguments[2] != null) arguments[2] = fixHistUrl(arguments[2]); } catch (e2) { /* ignore */ }",
 "      var r = _push.apply(this, arguments); reportNav(); return r;",
 "    };",
 "    history.replaceState = function () {",
+"      if (SD) {",
+"        try {",
+"          var ru = (arguments.length > 2 && arguments[2] != null) ? String(arguments[2]) : '';",
+"          if (ru && ru.charAt(0) !== '#') {",
+"            var rAbs = '';",
+"            try { rAbs = new URL(ru, DOC || 'about:srcdoc').href; } catch (eB) { rAbs = ru; }",
+"            up({ type: 'hist', url: mapUrl(rAbs), up: rAbs, replace: true });",
+"          }",
+"        } catch (eH2) { /* ignore */ }",
+"        reportNav();",
+"        return undefined;",
+"      }",
 "      try { if (arguments.length > 2 && arguments[2] != null) arguments[2] = fixHistUrl(arguments[2]); } catch (e2) { /* ignore */ }",
 "      var r = _replace.apply(this, arguments); reportNav(); return r;",
 "    };",
@@ -600,6 +815,8 @@ const PATCH_JS = [
 "  /* ---------- Navigation API interception (Chrome/Edge) ----------",
 "   * catches location.href=..., form submits, link clicks \u2014 anything",
 "   * that would navigate this frame to an absolute or external URL.",
+"   * v5 sandbox: EVERY navigation is intercepted \u2014 the frame must never",
+"   * go anywhere; the shell re-renders a fresh srcdoc instead.",
 "   */",
 "  try {",
 "    if (window.navigation && window.navigation.addEventListener) {",
@@ -608,6 +825,17 @@ const PATCH_JS = [
 "          if (!e.canIntercept || !e.destination || e.destination.sameDocument) return;",
 "          var dest = String(e.destination.url || '');",
 "          if (!dest) return;",
+"          if (SD) {",
+"            e.preventDefault();",
+"            if (isWorkerUrl(dest)) { nav(dest); return; } /* already proxied */",
+"            if (/^https?:\\/\\//i.test(dest) && !allowedHost((dest.match(/^https?:\\/\\/([^\\/?#]+)/i) || [])[1])) {",
+"              up({ type: 'ext', url: dest });",
+"              pageToast('Blocked (outside the proxy): ' + dest);",
+"              return;",
+"            }",
+"            nav(dest);",
+"            return;",
+"          }",
 "          var org = originStr();",
 "          if (org && (dest === org || dest.indexOf(org + '/') === 0)) {",
 "            // same-origin destination on the worker itself: either an",
@@ -654,6 +882,19 @@ const PATCH_JS = [
 "    try {",
 "      var u = url == null ? '' : String(url);",
 "      if (!u || u === 'about:blank') return stubWindow();",
+"      if (SD) {",
+"        /* v5 sandbox: no popups from the sandbox \u2014 in-app navigation or",
+"         * the external notice, never a real window (its first navigation",
+"         * would hit the org filter). */",
+"        if (isWorkerUrl(u)) { nav(u); return stubWindow(); }",
+"        if (/^https?:\\/\\//i.test(u) && !allowedHost((u.match(/^https?:\\/\\/([^\\/?#]+)/i) || [])[1])) {",
+"          up({ type: 'ext', url: u });",
+"          pageToast('Blocked (outside the proxy): ' + u);",
+"          return stubWindow();",
+"        }",
+"        nav(u);",
+"        return stubWindow();",
+"      }",
 "      var mapped = mapUrl(u);",
 "      if (mapped !== u) { location.href = mapped; return stubWindow(); }",
 "      if (/^(https?:)?\\/\\//i.test(u)) { up({ type: 'ext', url: u }); pageToast('Blocked (outside the proxy): ' + u); return stubWindow(); }",
@@ -673,6 +914,19 @@ const PATCH_JS = [
 "      var href = a.getAttribute('href') || '';",
 "      if (!href || href.charAt(0) === '#' || /^(data|blob|javascript|mailto|tel):/i.test(href)) return;",
 "      var target = (a.target || '').toLowerCase();",
+"      if (SD) {",
+"        /* v5 sandbox: NOTHING navigates \u2014 every link becomes a nav()",
+"         * postMessage and the shell re-renders a fresh srcdoc. */",
+"        e.preventDefault();",
+"        if (isWorkerUrl(href)) { nav(href); return; } /* worker-rewritten attr */",
+"        if (/^https?:\\/\\//i.test(href) && !allowedHost((href.match(/^https?:\\/\\/([^\\/?#]+)/i) || [])[1])) {",
+"          up({ type: 'ext', url: href });",
+"          pageToast('Blocked (outside the proxy): ' + href);",
+"          return;",
+"        }",
+"        nav(href);",
+"        return;",
+"      }",
 "      var mapped = mapUrl(href);",
 "      if (mapped !== href) {",
 "        if (target === '_top' || target === '_parent' || target === '_blank') {",
@@ -696,8 +950,101 @@ const PATCH_JS = [
 "    } catch (err) { /* ignore */ }",
 "  }, true);",
 "",
+"  /* ---------- v5: form serialization (sandbox submits) -----------------",
+"   * A form submit must become a POST navigation the SHELL performs via",
+"   * fetch(): method + enctype + all successful controls. Multipart",
+"   * forms ship the FormData object itself (postMessage structured-clones",
+"   * it); urlencoded forms ship a plain string. */",
+"  function serializeForm(f) {",
+"    var enctype = (f.getAttribute('enctype') || 'application/x-www-form-urlencoded').toLowerCase();",
+"    var method = (f.getAttribute('method') || 'GET').toUpperCase();",
+"    if (enctype.indexOf('multipart') >= 0) {",
+"      try {",
+"        var fd = new FormData(f);",
+"        return { method: method === 'GET' ? 'POST' : method, body: fd, ct: null };",
+"      } catch (eFD) { /* fall through to urlencoded */ }",
+"    }",
+"    var parts = [];",
+"    try {",
+"      var els = f.elements;",
+"      for (var i = 0; i < els.length; i++) {",
+"        var fe = els[i];",
+"        if (!fe.name || fe.disabled) continue;",
+"        var ft = (fe.type || '').toLowerCase();",
+"        if (ft === 'checkbox' || ft === 'radio') { if (fe.checked) parts.push([fe.name, fe.value || '']); continue; }",
+"        if (ft === 'file') {",
+"          try {",
+"            if (fe.files && fe.files[0]) parts.push([fe.name, fe.files[0].name]);",
+"          } catch (eF) { /* ignore */ }",
+"          continue;",
+"        }",
+"        if (ft === 'submit' || ft === 'button' || ft === 'image' || ft === 'reset') continue;",
+"        if (fe.tagName === 'SELECT') {",
+"          var opts = fe.selectedOptions || [];",
+"          for (var oi = 0; oi < opts.length; oi++) parts.push([fe.name, opts[oi].value || '']);",
+"          continue;",
+"        }",
+"        parts.push([fe.name, fe.value || '']);",
+"      }",
+"    } catch (eE) { /* ignore */ }",
+"    /* the submit button that fired (name+value) is not in elements' values */",
+"    try {",
+"      if (f.__zpSubBtn && f.__zpSubBtn.name) parts.push([f.__zpSubBtn.name, f.__zpSubBtn.value || '']);",
+"    } catch (eS) { /* ignore */ }",
+"    var qs = parts.map(function (p) { return encodeURIComponent(p[0]) + '=' + encodeURIComponent(p[1] || ''); }).join('&');",
+"    var ct = enctype.indexOf('text/plain') >= 0 ? 'text/plain' : 'application/x-www-form-urlencoded';",
+"    return { method: method, body: qs, ct: ct };",
+"  }",
+"  try {",
+"    if (SD) {",
+"      /* remember the submit button that fired (its name/value is part of",
+"       * the successful controls set per HTML spec) */",
+"      document.addEventListener('click', function (e) {",
+"        try {",
+"          var b = e.target && e.target.closest ? e.target.closest('button, input[type=submit], input[type=image]') : null;",
+"          if (b && b.form) b.form.__zpSubBtn = b;",
+"        } catch (eB) { /* ignore */ }",
+"      }, true);",
+"      document.addEventListener('submit', function (e) {",
+"        try {",
+"          var f = e.target;",
+"          if (!f || !f.getAttribute) return;",
+"          e.preventDefault();",
+"          var action = f.getAttribute('action') || '';",
+"          var dest = action || curUrl();",
+"          if (isWorkerUrl(dest)) {",
+"            /* the action was already rewritten to the worker origin \u2014",
+"             * navigate straight to it (the shell strips the origin) */",
+"            var serW = serializeForm(f);",
+"            if ((serW.method || 'GET') === 'GET') {",
+"              var baseW = dest.split('#')[0].split('?')[0];",
+"              nav(baseW + (serW.body ? '?' + serW.body : ''));",
+"            } else {",
+"              nav(dest, serW.method, serW.body, serW.ct);",
+"            }",
+"            return;",
+"          }",
+"          if (/^https?:\\/\\//i.test(dest) && !allowedHost((dest.match(/^https?:\\/\\/([^\\/?#]+)/i) || [])[1])) {",
+"            up({ type: 'ext', url: dest });",
+"            return;",
+"          }",
+"          var ser = serializeForm(f);",
+"          if ((ser.method || 'GET') === 'GET') {",
+"            /* GET forms: the body becomes the destination query */",
+"            var base = dest.split('#')[0].split('?')[0];",
+"            dest = base + (ser.body ? '?' + ser.body : '');",
+"            nav(dest);",
+"          } else {",
+"            nav(dest, ser.method, ser.body, ser.ct);",
+"          }",
+"        } catch (errS) { /* ignore */ }",
+"      }, true);",
+"    }",
+"  } catch (eSubArm) { /* ignore */ }",
+"",
 "  document.addEventListener('submit', function (e) {",
 "    try {",
+"      if (SD) return; /* handled by the sandbox submit arm above */",
 "      var f = e.target;",
 "      if (!f || !f.getAttribute) return;",
 "      var action = f.getAttribute('action') || '';",
@@ -716,13 +1063,28 @@ const PATCH_JS = [
 "  }, true);",
 "",
 "  /* ---------- service worker: never register ----------",
-"   * a SW would bypass every patch we installed.",
+"   * a SW would bypass every patch we installed. In the sandbox the",
+"   * navigator.serviceWorker PROPERTY itself throws SecurityError on",
+"   * access (opaque origin) \u2014 so the whole getter is stubbed first.",
 "   */",
 "  try {",
-"    if (navigator.serviceWorker && navigator.serviceWorker.register) {",
-"      navigator.serviceWorker.register = function () {",
-"        return Promise.resolve({ scope: '/', active: null, installing: null, waiting: null, unregister: function () { return Promise.resolve(true); }, addEventListener: function () {}, state: 'activated' });",
-"      };",
+"    var SW_STUB = {",
+"      register: function () { return Promise.resolve({ scope: '/', active: null, installing: null, waiting: null, unregister: function () { return Promise.resolve(true); }, addEventListener: function () {}, state: 'activated' }); },",
+"      getRegistration: function () { return Promise.resolve(undefined); },",
+"      getRegistrations: function () { return Promise.resolve([]); },",
+"      addEventListener: function () {},",
+"      removeEventListener: function () {},",
+"      ready: new Promise(function () {}),",
+"      controller: null",
+"    };",
+"    if (SD) {",
+"      try {",
+"        Object.defineProperty(Navigator.prototype, 'serviceWorker', { configurable: true, get: function () { return SW_STUB; } });",
+"      } catch (eSWP) {",
+"        try { Object.defineProperty(navigator, 'serviceWorker', { configurable: true, get: function () { return SW_STUB; } }); } catch (eSWI) { /* ignore */ }",
+"      }",
+"    } else if (navigator.serviceWorker && navigator.serviceWorker.register) {",
+"      navigator.serviceWorker.register = SW_STUB.register;",
 "    }",
 "  } catch (e) { /* ignore */ }",
 "",
@@ -999,7 +1361,11 @@ const PATCH_JS = [
 "",
 "  /* ---------- localStorage fallback for browsers that block it in iframes ----------",
 "   * backed by the shell through postMessage so sessions survive reloads.",
-"   */",
+"   * v5 sandbox note: in a null-origin frame ACCESSING window.localStorage",
+"   * THROWS SecurityError \u2014 the access must happen in its own try BEFORE",
+"   * the usable() probe, or the exception skips the shim entirely (the",
+"   * site's own `window.localStorage && ...` guard would then throw and",
+"   * silently kill its boot logic). */",
 "  (function setupStorage() {",
 "    function usable(store) {",
 "      try {",
@@ -1020,11 +1386,12 @@ const PATCH_JS = [
 "      };",
 "    }",
 "    ['localStorage', 'sessionStorage'].forEach(function (name) {",
+"      var native = null;",
+"      try { native = window[name]; } catch (eAcc) { native = null; }",
+"      if (native && usable(native)) return; /* native storage works \u2014 keep it */",
 "      try {",
-"        if (!usable(window[name])) {",
-"          Object.defineProperty(window, name, { value: makeShim(name), configurable: true, writable: false });",
-"        }",
-"      } catch (e) { /* ignore */ }",
+"        Object.defineProperty(window, name, { value: makeShim(name), configurable: true, writable: false });",
+"      } catch (eDef) { /* ignore */ }",
 "    });",
 "  })();",
 "",
@@ -1058,9 +1425,24 @@ const PATCH_JS = [
 "       * (file:// origin on Chrome, null on Safari) hosting the",
 "       * sandboxed app view */",
 "      if (e.origin !== 'null' && e.origin !== 'file://' && WORKER && e.origin !== WORKER) return;",
+"      if (SD && d.cmd !== 'init' && d.cmd !== 'getstate') {",
+"        /* v5 sandbox: back/forward/reload/navigate are SHELL-owned \u2014 the",
+"         * shell re-renders entries itself; only state exchange reaches",
+"         * the frame. Anything else still arrives (e.g. from the worker)",
+"         * and is forwarded as a request. */",
+"        if (d.cmd === 'back') { up({ type: 'goback' }); return; }",
+"        if (d.cmd === 'forward') { up({ type: 'gofwd' }); return; }",
+"        if (d.cmd === 'reload') { up({ type: 'reloadreq' }); return; }",
+"        if (d.cmd === 'navigate') { if (d.url) nav(String(d.url)); return; }",
+"      }",
 "      switch (d.cmd) {",
 "        case 'init':",
-"          jar = Array.isArray(d.jar) ? d.jar : [];",
+"          if (Array.isArray(d.jar)) {",
+"            var jarM = {};",
+"            jar.forEach(function (c) { if (c && c.name) jarM[c.name] = c; });",
+"            d.jar.forEach(function (c) { if (c && c.name) jarM[c.name] = c; });",
+"            jar = Object.keys(jarM).map(function (k) { return jarM[k]; });",
+"          }",
 "          if (d.ls) {",
 "            Object.keys(d.ls).forEach(function (k) {",
 "              if (!(k in lsMirror)) lsMirror[k] = d.ls[k];",
@@ -1079,6 +1461,16 @@ const PATCH_JS = [
 "      }",
 "    } catch (err) { /* ignore */ }",
 "  });",
+"",
+"  /* ---------- v5: escape sentinel --------------------------------------",
+"   * pagehide fires when this frame navigates ANYWHERE (the one thing",
+"   * the location rewrites could not catch \u2014 e.g. `window.location = X`",
+"   * left raw on purpose, or location.reload()). The shell re-arms this",
+"   * around intentional srcdoc swaps; an UNARMED 'bye' means the document",
+"   * escaped \u2014 the shell recovers by re-rendering the current entry. */",
+"  try {",
+"    if (SD) window.addEventListener('pagehide', function () { up({ type: 'bye' }); });",
+"  } catch (eBye) { /* ignore */ }",
 "",
 "  /* ---------- boot ---------- */",
 "  up({ type: 'hello', url: curUrl(), title: document.title || '' });",
@@ -1112,8 +1504,19 @@ async function handle(req, event) {
         const supplied = url.searchParams.has('__t') || req.headers.get('x-proxy-token') != null;
         if (supplied) tokenOk = (url.searchParams.get('__t') === token || req.headers.get('x-proxy-token') === token);
       }
-      return json({ ok: true, name: VERSION, time: new Date().toISOString(), token_required: !!token, token_ok: tokenOk }, req);
+      /* v5: "entry" is the tokenized ROOT DOCUMENT path — the saved
+       * pocket file fetches it to boot the app without ever knowing
+       * the token key or the upstream host. Neutral JSON: no z.ai
+       * strings anywhere in this body. */
+      const entry = tokPath(chatUpstream(event) + '/');
+      return json({ ok: true, name: VERSION, time: new Date().toISOString(), token_required: !!token, token_ok: tokenOk, entry: entry }, req);
     }
+
+    /* ---- neutral favicon: never a proxied page ---- */
+    if (url.pathname === '/favicon.ico' || url.pathname === '/favicon.png') {
+      return new Response(null, { status: 204, headers: corsHeaders(req, new Headers()) });
+    }
+
 
     /* ---- live upstream probe report (v3) ----
      * Public like /__status: no secrets, and it must stay reachable
@@ -1122,17 +1525,7 @@ async function handle(req, event) {
     if (url.pathname === '/__diag') {
       return diagPage(req, event);
     }
-    /* ---- app entry: "/" IS the app ----
-     * With a token required and not yet satisfied, / shows the setup
-     * page; otherwise it falls through and is proxied like any path. */
-    if (url.pathname === '/') {
-      const env = envOf(event);
-      const token = env.PROXY_TOKEN || '';
-      if (token && !(await checkToken(req, url, token))) {
-        /* a token was submitted but wrong → show the hint; fresh visit → plain form */
-        return landing(event, url.searchParams.has('__t'));
-      }
-    }
+
 
     /* ---- token gate ---- */
     const env = envOf(event);
@@ -1140,8 +1533,10 @@ async function handle(req, event) {
     if (token && !(await checkToken(req, url, token))) {
       const accept = req.headers.get('accept') || '';
       if (method === 'GET' && accept.includes('text/html')) {
-        /* a human navigation with a wrong/missing token → the setup page */
-        return landing(event, true);
+        /* a human navigation with a wrong/missing token → the setup page
+         * (with the "not accepted" hint only when a token was tried) */
+        const attempted = url.searchParams.has('__t') || req.headers.get('x-proxy-token') != null;
+        return landing(event, attempted);
       }
       return json({ error: 'unauthorized', hint: 'set X-Proxy-Token header or __t query param' }, req, 401);
     }
@@ -1153,6 +1548,17 @@ async function handle(req, event) {
       const h = new Headers({ location: clean.pathname + (clean.search || ''), 'cache-control': 'no-store' });
       h.append('set-cookie', tokenCookie(token));
       return new Response(null, { status: 302, headers: corsHeaders(req, h) });
+    }
+
+    /* ---- v5: the root is a NEUTRAL service page ------------------
+     * The phone never navigates here for content anymore — and it
+     * must never serve z.ai HTML, so a content classifier that
+     * fetches the root sees a boring status page, not an AI chat
+     * app. (The token gate above has already handled PROXY_TOKEN,
+     * including the __t-query 302 cleanup, so this only runs for
+     * token-satisfied or tokenless workers.) */
+    if (url.pathname === '/') {
+      return servicePage(req);
     }
 
     /* ---- session cookie clear ---- */
@@ -1180,12 +1586,8 @@ async function handle(req, event) {
     let host = null;     // upstream host
     let tokMode = false; // this request came through /__t/<token>
 
-    if (url.pathname === '/chat' || url.pathname.startsWith('/chat/')) {
-      /* legacy v2 prefix — the SPA errors on /chat/; move to / */
-      const rest = url.pathname.slice('/chat'.length) || '/';
-      return redirect(req, rest + url.search);
-    } else if (url.pathname.startsWith('/__t/')) {
-      /* v4 opaque token: the ONLY form cross-host URLs take now */
+    if (url.pathname.startsWith('/__t/')) {
+      /* v4/v5 opaque token: the ONLY form content URLs take now */
       const tok = url.pathname.slice(5);
       const dec = decTok(tok);
       if (!dec || !/^https?:\/\//i.test(dec)) {
@@ -1210,11 +1612,11 @@ async function handle(req, event) {
       pfx = '/p/' + host;
       upstream = 'https://' + host + path + url.search;
     } else {
-      /* transparent catch-all: the whole worker mirrors chat.z.ai.
-       * Runtime-built root-absolute URLs (/static/logo.png, /user.png …)
-       * and SPA routes (/auth, /#…) behave exactly like the real site. */
-      host = chatHost(event);
-      upstream = chatUpstream(event) + url.pathname + url.search;
+      /* v5: bare paths no longer mirror chat.z.ai — the transparent
+       * catch-all is GONE. Nothing navigates to this worker; the only
+       * content route is /__t/<token>. Answer a neutral 404 so the
+       * origin never serves anything classifiable. */
+      return json({ ok: false, service: 'zp', status: 404, note: 'nothing is served at this path' }, req, 404);
     }
 
     /* ---- query handling ----
@@ -1328,8 +1730,31 @@ async function handle(req, event) {
     }
     if (ct.includes('text/css')) {
       const text = await res.text();
-      const css = rewriteCss(text, pfx, host, allowList(event), tokMode ? upUrl.toString() : null);
+      const css = rewriteCss(text, pfx, host, allowList(event), tokMode ? upUrl.toString() : null, new URL(req.url).origin);
       return new Response(css, { status: res.status, headers: outCt });
+    }
+    /* ---- v5: JavaScript location-assignment rewrite ----------------
+     * Inside the sandbox frame the document lives at about:srcdoc; a
+     * script that does location.href = X (or location.assign/replace)
+     * would navigate the frame OUT of the sandbox — to a URL the org
+     * filter blocks. Rewriting those tokens to __zaiLoc (the fake
+     * location object the runtime patch installs BEFORE any site
+     * script runs) turns every SPA redirect into a postMessage that
+     * the pocket shell turns into a fresh sandboxed document. Reads
+     * (location.href/pathname/origin...) are rewritten too, so SPA
+     * routers hydrate against the REAL upstream URL instead of
+     * about:srcdoc. Conservative patterns only — Superwork's v2.12
+     * lesson: an aggressive wrap can emit a syntax error and kill an
+     * entire bundle at parse time. */
+    if (tokMode && /javascript|ecmascript|text\/jscript/i.test(ct)) {
+      const text = await res.text();
+      const js = rewriteJsLocation(text);
+      if (js !== text) {
+        const h2 = new Headers(outCt);
+        h2.set('x-zp-jsrw', '1');
+        return new Response(js, { status: res.status, headers: h2 });
+      }
+      return new Response(text, { status: res.status, headers: outCt });
     }
 
     return new Response(res.body, { status: res.status, headers: outCt });
@@ -1619,10 +2044,9 @@ function mapLocation(loc, upUrl, event, tokMode) {
     if (!hostAllowed(abs.host, event)) return loc; // external redirect — pass through untouched
     if (tokMode) {
       /* this response came from a /__t/<token> request — there is no
-       * path prefix to re-attach, so every allowed target becomes a
-       * token too (except the chat host, which lives at the
-       * transparent root) */
-      if (abs.host === chatHost(event)) return abs.pathname + abs.search;
+       * path prefix and (v5) no transparent root anymore: EVERY
+       * allowed target becomes a token, same-host or not, so the
+       * fetching shell can follow it without hitting a neutral 404. */
       return tokPath(abs.toString());
     }
     if (abs.host === upUrl.host) {
@@ -1646,8 +2070,13 @@ function prefixForHost(host, event) {
  *         every URL it references (absolute, root-relative,
  *         relative) must be absolutized against tokDoc and
  *         tokenized: that is what keeps the whole app sandboxed
- *         inside opaque worker paths. */
-function mapAttr(v, pfx, host, allow, tokDoc) {
+ *         inside opaque worker paths.
+ * v5: in tokDoc mode the token path is emitted ABSOLUTE (worker
+ *         origin + /__t/…) because the document is painted into an
+ *         about:srcdoc frame — a relative "/__t/…" cannot resolve
+ *         against about:srcdoc's inherited file:// base, so every
+ *         subresource (script, css, img) would silently fail. */
+function mapAttr(v, pfx, host, allow, tokDoc, workerOrigin) {
   try {
     const s = String(v || '').trim();
     if (!s) return v;
@@ -1657,7 +2086,8 @@ function mapAttr(v, pfx, host, allow, tokDoc) {
       if (abs.protocol !== 'https:' && abs.protocol !== 'http:') return v;
       const ok = allow.some((a) => abs.host === a || abs.host.endsWith('.' + a));
       if (!ok) return v;
-      return tokPath(abs.toString());
+      const tp = tokPath(abs.toString());
+      return tp ? (workerOrigin ? workerOrigin.replace(/\/$/, '') + tp : tp) : v;
     }
     let m;
     if ((m = s.match(/^https?:\/\/([^\/?#]+)/i))) {
@@ -1699,7 +2129,7 @@ function rewriteHtml(text, pfx, host, workerOrigin, token, allow, tokDoc) {
     const attrRe = new RegExp('(\\s(?:' + ATTR_NAMES + ')\\s*=\\s*)("([^"]*)"|\'([^\']*)\')', 'gi');
     text = text.replace(attrRe, (whole, pre, quoted, dq, sq) => {
       const v = dq !== undefined ? dq : sq;
-      const nv = mapAttr(v, pfx, host, allow, tokDoc);
+      const nv = mapAttr(v, pfx, host, allow, tokDoc, workerOrigin);
       if (nv === v) return whole;
       return pre + '"' + String(nv).replace(/"/g, '%22') + '"';
     });
@@ -1714,7 +2144,7 @@ function rewriteHtml(text, pfx, host, workerOrigin, token, allow, tokDoc) {
         const sp = t.indexOf(' ');
         const u = sp < 0 ? t : t.slice(0, sp);
         const rest = sp < 0 ? '' : t.slice(sp);
-        const nu = mapAttr(u, pfx, host, allow, tokDoc);
+        const nu = mapAttr(u, pfx, host, allow, tokDoc, workerOrigin);
         return nu === u ? t : nu + rest;
       }).filter(Boolean).join(', ');
       if (nv === v) return whole;
@@ -1726,7 +2156,7 @@ function rewriteHtml(text, pfx, host, workerOrigin, token, allow, tokDoc) {
     text = text.replace(styleRe, (whole, pre, quoted, dq, sq) => {
       const v = dq !== undefined ? dq : sq;
       const nv = v.replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/gi, (w, q, u) => {
-        const nu = mapAttr(u, pfx, host, allow, tokDoc);
+        const nu = mapAttr(u, pfx, host, allow, tokDoc, workerOrigin);
         return nu === u ? w : "url('" + nu + "')";
       });
       if (nv === v) return whole;
@@ -1735,7 +2165,7 @@ function rewriteHtml(text, pfx, host, workerOrigin, token, allow, tokDoc) {
 
     /* inject config + runtime patch as the first script */
     const cfg = { pfx: pfx, host: host, worker: workerOrigin, token: token || '', allow: allow,
-      key: TOK_KEY, tok: !!tokDoc, doc: tokDoc || '' };
+      key: TOK_KEY, tok: !!tokDoc, doc: tokDoc || '', sd: !!tokDoc };
     const inject = '<scr' + 'ipt>window.__ZAI__=' + JSON.stringify(cfg) + ';' + PATCH_JS + '</scr' + 'ipt>';
     if (/<head[^>]*>/i.test(text)) text = text.replace(/<head[^>]*>/i, (m) => m + inject);
     else if (/<html[^>]*>/i.test(text)) text = text.replace(/<html[^>]*>/i, (m) => m + inject);
@@ -1746,23 +2176,76 @@ function rewriteHtml(text, pfx, host, workerOrigin, token, allow, tokDoc) {
   }
 }
 
-function rewriteCss(text, pfx, host, allow, tokDoc) {
+function rewriteCss(text, pfx, host, allow, tokDoc, workerOrigin) {
   try {
     text = text.replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/gi, (w, q, u) => {
-      const nu = mapAttr(u, pfx, host, allow, tokDoc);
+      const nu = mapAttr(u, pfx, host, allow, tokDoc, workerOrigin);
       return nu === u ? w : 'url("' + nu + '")';
     });
     text = text.replace(/@import\s*(['"])([^'"]+)\1/gi, (w, q, u) => {
       /* \s* — z.ai's CDN ships minified css like @import"https://…";
        * with NO space and NO parens. That exact form leaked the
        * upstream hostname straight to the browser once. */
-      const nu = mapAttr(u, pfx, host, allow, tokDoc);
+      const nu = mapAttr(u, pfx, host, allow, tokDoc, workerOrigin);
       return nu === u ? w : '@import "' + nu + '"';
     });
     return text;
   } catch (e) {
     return text;
   }
+}
+
+/* ---------------- v5: JS location-assignment rewrite ----------------
+ * Served scripts may navigate the sandbox frame with
+ *   location.href = X · location.assign/replace(X)
+ * and SPA routers read location.href / pathname / origin to hydrate.
+ * Inside the sandbox the document sits at about:srcdoc, so reads are
+ * nonsense and writes navigate OUT (straight into the org filter).
+ * Every occurrence of those tokens becomes __zaiLoc.<prop> — the fake
+ * location the runtime patch installs first: reads answer the REAL
+ * upstream URL, writes postMessage the pocket shell (the href property
+ * carries a setter, so `__zaiLoc.href = X` is valid even inside
+ * ternaries). Patterns are deliberately conservative — the Superwork
+ * v2.12 lesson: one bad wrap is a parse-time syntax error that kills a
+ * whole bundle. `location = X` / `window.location = X` LVALUE forms are
+ * left RAW (a real navigation the shell's escape recovery catches).
+ * A prop name after `location.` keeps this from ever touching bare
+ * `location` reads or unrelated identifiers. */
+function rewriteJsLocation(text) {
+  try {
+    if (!/location\b/.test(text)) return text;
+    let out = text;
+    /* member forms, prefixed (window/document/self/top/parent/globalThis): */
+    out = out.replace(/(?:window|document|self|top|parent|globalThis|global)\.location\.(href|assign|replace|reload|pathname|search|hash|origin|host|hostname|protocol|port|toString)\b/gi,
+      (w, prop) => '__zaiLoc.' + prop);
+    /* bare location.<prop> — the leading (?<![.\w$]) stops it from
+     * matching x.location.href (nested-frame access) or mylocation.href: */
+    out = out.replace(/(?<![.\w$])location\.(href|assign|replace|reload|pathname|search|hash|origin|host|hostname|protocol|port|toString)\b/gi,
+      (w, prop) => '__zaiLoc.' + prop);
+    return out;
+  } catch (e) {
+    return text;
+  }
+}
+
+/* ---------------- v5: neutral service page (the root) ----------------
+ * Everything a classifier can crawl at this origin must look like a
+ * boring uptime page: no product names, no chat UI, no z.ai strings,
+ * no AI vocabulary. The real app only ever lives behind opaque
+ * /__t/<token> fetches. */
+function servicePage(req) {
+  const html = '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
+    '<meta name="viewport" content="width=device-width, initial-scale=1">' +
+    '<title>service</title>' +
+    '<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#F2F3F5;color:#3A3D45;font:15px/1.5 -apple-system,BlinkMacSystemFont,system-ui,"Segoe UI",Roboto,sans-serif}' +
+    '.c{text-align:center}.d{width:44px;height:44px;margin:0 auto 14px;border-radius:50%;background:#1F9D55;display:flex;align-items:center;justify-content:center}.d svg{width:24px;height:24px}' +
+    'h1{margin:0;font-size:17px;font-weight:600;color:#101114}p{margin:6px 0 0;color:#82868F;font-size:13px}' +
+    'code{font:12px/1 ui-monospace,SFMono-Regular,Menlo,monospace;background:#E3E5EA;border-radius:6px;padding:2px 6px;color:#3A3D45}</style></head>' +
+    '<body><div class="c"><div class="d"><svg viewBox="0 0 64 64"><path d="M18 34l10 10 20-24" stroke="#fff" stroke-width="7" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div>' +
+    '<h1>Service online</h1>' +
+    '<p>Relay endpoint &middot; status at <code>/__status</code></p>' +
+    '</div></body></html>';
+  return new Response(html, { status: 200, headers: corsHeaders(req, new Headers({ 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })) });
 }
 
 /* ---------------- websocket proxy ---------------- */
@@ -1836,7 +2319,7 @@ function landing(event, bad) {
   const html = '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
     '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">' +
     '<meta name="theme-color" content="#0B0D12">' +
-    '<title>z.ai pocket — setup</title>' +
+    '<title>zp service — setup</title>' +
     '<link rel="icon" href="data:image/svg+xml,' + encodeURIComponent(FAVICON_SVG) + '">' +
     '<style>' +
     ':root{--bg:#0B0D12;--panel:#14161F;--panel2:#1A1D28;--line:rgba(255,255,255,.08);--txt:#E7E9EE;--sub:#9AA1AD;--acc:#6E6AF8;--bad:#F87171}' +
@@ -1860,12 +2343,12 @@ function landing(event, bad) {
     '.hint b{color:var(--txt)}' +
     '</style></head><body><div class="card">' +
     '<div class="logoRow"><div class="logo"><svg viewBox="0 0 64 64"><path d="M18 20h28v7H33.5L46 44h-8.5L27 30.5V44h-9z" fill="#fff"/></svg></div>' +
-    '<div><h1>z.ai pocket</h1><div class="tag">This worker is protected by a proxy token.</div></div></div>' +
+    '<div><h1>zp service</h1><div class="tag">This endpoint is protected by an access token.</div></div></div>' +
     (bad ? '<div class="err">That token was not accepted — check it and try again.</div>' : '') +
     '<form method="GET" action="/">' +
     '<label for="t">PROXY TOKEN</label>' +
     '<div class="inWrap"><input id="t" name="__t" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="paste your PROXY_TOKEN" autofocus></div>' +
-    '<button class="btn" type="submit">Enter Z.ai&nbsp;&rarr;</button></form>' +
+    '<button class="btn" type="submit">Continue&nbsp;&rarr;</button></form>' +
     '<div class="hint">The token lives in your worker\u2019s <b>Settings &rarr; Variables &rarr; PROXY_TOKEN</b> on dash.cloudflare.com. ' +
     'It is stored in a cookie on this device, so you only enter it once.</div>' +
     '</div></body></html>';
