@@ -1,5 +1,5 @@
 /* ============================================================
- * z.ai pocket — Cloudflare Worker reverse proxy (v2)
+ * z.ai pocket — Cloudflare Worker reverse proxy (v3)
  * ------------------------------------------------------------
  * WHAT THIS DOES
  *   Open THIS WORKER'S URL in your phone browser — that URL is
@@ -10,42 +10,64 @@
  *   which forwards it to the z.ai family of hosts. The browser
  *   never talks to z.ai directly.
  *
- * DEPLOY (you already have a worker):
+ * v3 CHANGES — fixes "opens straight to a blocked page"
+ *   1. Cloudflare-edge headers that arrive on every request
+ *      hitting this worker (cf-connecting-ip, cf-ipcountry,
+ *      cf-ray, cf-visitor, x-forwarded-for, cdn-loop,
+ *      true-client-ip, ...) are NO LONGER forwarded upstream.
+ *      chat.z.ai is itself behind Cloudflare, and handing it
+ *      forged CF headers is classic WAF bait: some regions
+ *      answer with a block page.
+ *   2. If z.ai still answers 403/429 on a GET, the worker
+ *      retries ONCE with a minimal clean header set before it
+ *      gives up (successful retries are tagged x-zp-retry: 1).
+ *   3. New public /__diag page — open it on the phone and it
+ *      shows, live, what z.ai returns for this worker: three
+ *      probes (browser-like / minimal / the old v2 forged-header
+ *      way) with status, colo and body preview, plus what this
+ *      worker received from your network. If z.ai is blocking,
+ *      this page says so in plain words.
+ *
+ * DEPLOY (you already have a worker)
  *   1. dash.cloudflare.com → Workers & Pages → your worker
  *   2. "Edit code" / Quick Edit → select all → paste this file
  *   3. Save & Deploy
- *   4. (recommended) Settings → Variables → add PROXY_TOKEN with
- *      a long random string. Then open the worker URL once and
- *      enter that token — it is remembered in a cookie.
- *      Optional: EXTRA_HOSTS="a.com,b.com" to allowlist more
- *      first-party hosts.
+ *   4. (optional) Settings → Variables → PROXY_TOKEN with a long
+ *      random string (then / asks for it once) and/or
+ *      EXTRA_HOSTS="a.com,b.com" to allowlist more first-party
+ *      hosts.
+ *   5. Open the worker URL — that IS the app. The zai-pocket.html
+ *      file already saved on your phone keeps working unchanged
+ *      (it only talks to /__status, which is unchanged).
+ *      If the app ever shows a blocked or error page, open
+ *      https://<your-worker>/__diag and read what it says.
  *
  * ROUTES
- *   /                  -> https://chat.z.ai/   — the app itself,
- *                          full-screen, no prefix (the SPA only works
- *                          at "/"; on /chat/ it renders its own error
- *                          page). If PROXY_TOKEN is set and not yet
- *                          satisfied, / shows the token setup page.
- *   /chat/*            -> 302 to /*            (legacy v2 prefix)
- *   /p/<host>/*        -> https://<host>/*  (host must be allowlisted)
- *   anything else      -> https://chat.z.ai/<path>  (transparent
- *                          catch-all: the SPA builds root-absolute
- *                          URLs at runtime, e.g. /static/logo.png,
- *                          /user.png — they behave exactly like they
- *                          do on the real site)
- *   /__status          -> health check JSON
- *   /__clear           -> wipe all session cookies, back to /
+ *   /            -> https://chat.z.ai/   — the app itself,
+ *                    full-screen, no prefix (the SPA only works
+ *                    at "/"; on /chat/ it renders its own error
+ *                    page). With PROXY_TOKEN set and unsatisfied,
+ *                    / shows the token setup page.
+ *   /chat/*      -> 302 to /*            (legacy v2 prefix)
+ *   /p/<host>/*  -> https://<host>/*     (allowlisted hosts only)
+ *   anything else -> https://chat.z.ai/<path> (transparent
+ *                    catch-all: runtime-built root-absolute URLs
+ *                    like /static/logo.png behave like on the
+ *                    real site)
+ *   /__status    -> health-check JSON (the pocket file uses this)
+ *   /__diag      -> live upstream probe report (see v3 notes)
+ *   /__clear     -> wipe all session cookies, back to /
  *
  * SECURITY
  *   - Only z.ai / chatglm.cn / chatglm.site family hosts are
  *     proxied. This is NOT an open proxy.
  *   - With PROXY_TOKEN set, everything except the token page,
- *     /__status and preflights requires the token.
+ *     /__status and /__diag requires the token.
  *   - Upstream cookies are re-issued for this worker's own domain
  *     so the whole app is one same-origin page; sessions stick.
  * ============================================================ */
 
-const VERSION = 'zai-pocket-proxy 2.0';
+const VERSION = 'zai-pocket-proxy 3.1';
 
 /* z.ai first-party family (suffix match — covers subdomains) */
 const ALLOW = [
@@ -524,7 +546,7 @@ const PATCH_JS = [
 "      if (e.defaultPrevented || (e.button !== undefined && e.button !== 0)) return;",
 "      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;",
 "      var el = e.target;",
-"      var a = el && el.closest ? el.closest('a[href]') : null;",
+"      var a = el && el.closest ? el.closest('a[' + 'href]') : null;",
 "      if (!a) return;",
 "      var href = a.getAttribute('href') || '';",
 "      if (!href || href.charAt(0) === '#' || /^(data|blob|javascript|mailto|tel):/i.test(href)) return;",
@@ -787,6 +809,14 @@ async function handle(req, event) {
       }
       return json({ ok: true, name: VERSION, time: new Date().toISOString(), token_required: !!token, token_ok: tokenOk }, req);
     }
+
+    /* ---- live upstream probe report (v3) ----
+     * Public like /__status: no secrets, and it must stay reachable
+     * in every cookie/token state — when the app "opens straight to
+     * a blocked page", this page tells the user WHY. */
+    if (url.pathname === '/__diag') {
+      return diagPage(req, event);
+    }
     /* ---- app entry: "/" IS the app ----
      * With a token required and not yet satisfied, / shows the setup
      * page; otherwise it falls through and is proxied like any path. */
@@ -875,8 +905,23 @@ async function handle(req, event) {
     const skipReq = new Set(['host', 'origin', 'referer', 'cookie', 'connection', 'keep-alive', 'upgrade',
       'proxy-connection', 'te', 'trailer', 'transfer-encoding', 'content-length', 'accept-encoding',
       'x-cookie', 'x-proxy-token', 'x-set-cookie']);
+    /* v3: Cloudflare's edge injects its own connection headers
+     * (cf-connecting-ip, cf-ipcountry, cf-ray, cf-visitor,
+     * x-forwarded-for, cdn-loop, true-client-ip, ...) into every
+     * request that reaches this worker. Forwarding them to
+     * chat.z.ai — which runs behind Cloudflare itself — sends
+     * forged edge headers into another zone's WAF. They are
+     * dropped here, always. */
+    const dropExact = new Set(['cdn-loop', 'true-client-ip', 'x-real-ip']);
+    const dropPrefix = ['cf-', 'x-forwarded'];
     for (const [k, v] of req.headers) {
-      if (!skipReq.has(k.toLowerCase())) h.set(k, v);
+      const lk = k.toLowerCase();
+      if (skipReq.has(lk)) continue;
+      if (dropExact.has(lk)) continue;
+      let drop = false;
+      for (let i = 0; i < dropPrefix.length; i++) { if (lk.startsWith(dropPrefix[i])) { drop = true; break; } }
+      if (drop) continue;
+      h.set(k, v);
     }
     h.set('accept-encoding', 'gzip, deflate, br');
     h.set('cookie', mergeCookies(req.headers.get('cookie') || '', req.headers.get('x-cookie') || ''));
@@ -897,11 +942,28 @@ async function handle(req, event) {
     }
 
     let res;
+    let retried = false;
     try {
       const fetchInit = { method: method, headers: h, redirect: 'manual' };
       if (body !== undefined) fetchInit.body = body;
       if (needDuplex) fetchInit.duplex = 'half';
       res = await fetch(upUrl.toString(), fetchInit);
+      /* ---- v3: a 403/429 on a safe GET can be a WAF trip-wire fed
+       * by leftover request headers — retry ONCE with a minimal,
+       * clean header set before relaying the block page. ---- */
+      if ((res.status === 403 || res.status === 429) && (method === 'GET' || method === 'HEAD')) {
+        try {
+          const res2 = await fetch(upUrl.toString(), { method: method, headers: minimalHeaders(req, host), redirect: 'manual' });
+          retried = true; /* a retry attempt happened — tagged either way */
+          if (res2.status !== res.status) {
+            try { if (res.body && res.body.cancel) res.body.cancel(); } catch (e) { /* ignore */ }
+            res = res2;
+            retried = true;
+          } else {
+            try { if (res2.body && res2.body.cancel) res2.body.cancel(); } catch (e) { /* ignore */ }
+          }
+        } catch (e2) { /* keep the original response */ }
+      }
     } catch (err) {
       return json({ error: 'upstream fetch failed', detail: String(err && err.message || err) }, req, 502);
     }
@@ -923,6 +985,7 @@ async function handle(req, event) {
     reissueCookies(res, outHeaders, event);
     maybeSetTokenCookie(req, outHeaders, event);
     outHeaders.set('x-final-url', res.url || upUrl.toString());
+    if (retried) outHeaders.set('x-zp-retry', '1');
     const outCt = corsHeaders(req, outHeaders);
 
     if (ct.includes('text/html')) {
@@ -1055,7 +1118,7 @@ function corsHeaders(req, h) {
   h.set('access-control-allow-methods', 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS');
   const reqH = req.headers.get('access-control-request-headers');
   h.set('access-control-allow-headers', reqH || '*');
-  h.set('access-control-expose-headers', 'content-disposition, content-type, x-set-cookie, x-final-url, filename');
+  h.set('access-control-expose-headers', 'content-disposition, content-type, x-set-cookie, x-final-url, filename, x-zp-retry');
   h.set('access-control-max-age', '86400');
   return h;
 }
@@ -1063,6 +1126,156 @@ function corsHeaders(req, h) {
 function json(obj, req, status) {
   const h = new Headers({ 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
   return new Response(JSON.stringify(obj), { status: status || 200, headers: corsHeaders(req, h) });
+}
+
+/* ---- v3: the minimal clean header set used by the 403/429 retry ---- */
+function minimalHeaders(req, host) {
+  const h = new Headers();
+  const ua = req.headers.get('user-agent');
+  if (ua) h.set('user-agent', ua);
+  const al = req.headers.get('accept-language');
+  if (al) h.set('accept-language', al);
+  h.set('accept', req.headers.get('accept') || '*/*');
+  h.set('accept-encoding', 'gzip, deflate, br');
+  const ck = mergeCookies(req.headers.get('cookie') || '', req.headers.get('x-cookie') || '');
+  if (ck) h.set('cookie', ck);
+  h.set('origin', 'https://' + host);
+  h.set('referer', 'https://' + host + '/');
+  return h;
+}
+
+/* ---- v3: /__diag — live upstream probes ------------------------------
+ *
+ * Three GETs against the chat upstream, each shaped like a
+ * different worker generation, so the page shows exactly WHICH
+ * request style z.ai blocks (if any) from this worker's egress:
+ *   1. "app"     — what v3 forwards for the app document
+ *                  (browser-like, CF edge headers stripped)
+ *   2. "minimal" — accept + user-agent + origin/referer only
+ *   3. "forged"  — what v2 ACTUALLY forwarded: browser-like plus
+ *                  the Cloudflare edge headers that ride along on
+ *                  every request hitting the worker
+ */
+function esc(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+async function diagProbe(event, kind) {
+  const host = chatHost(event);
+  const up = chatUpstream(event) + '/';
+  const h = new Headers();
+  h.set('accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8');
+  h.set('accept-encoding', 'gzip, deflate, br');
+  h.set('accept-language', 'en-US,en;q=0.9');
+  h.set('user-agent', 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36');
+  h.set('origin', 'https://' + host);
+  h.set('referer', 'https://' + host + '/');
+  if (kind === 'minimal') {
+    h.delete('accept-language');
+  }
+  if (kind === 'forged') {
+    h.set('cf-connecting-ip', '198.51.100.7');
+    h.set('cf-ipcountry', 'US');
+    h.set('cf-ray', 'diag-probe');
+    h.set('x-forwarded-for', '198.51.100.7');
+    h.set('cdn-loop', 'cloudflare');
+  }
+  try {
+    const res = await fetch(up, { method: 'GET', headers: h, redirect: 'manual' });
+    let snippet = '';
+    try { snippet = (await res.text()).slice(0, 240); } catch (e) { snippet = '(body unreadable)'; }
+    return {
+      error: false,
+      status: res.status,
+      type: (res.headers.get('content-type') || '').split(';')[0] || '(none)',
+      server: res.headers.get('server') || '(none)',
+      ray: res.headers.get('cf-ray') || '(no cf-ray — upstream not on Cloudflare)',
+      mitigated: res.headers.get('cf-mitigated') || '',
+      location: res.headers.get('location') || '',
+      snippet: snippet.trim().replace(/\s+/g, ' ')
+    };
+  } catch (err) {
+    return { error: true, status: 0, detail: String((err && err.message) || err) };
+  }
+}
+
+async function diagPage(req, event) {
+  /* what the phone's own request arrived with (added by Cloudflare's
+   * edge on the way in) — the v3 worker no longer forwards these */
+  const incoming = [];
+  for (const [k, v] of req.headers) {
+    const lk = k.toLowerCase();
+    if (lk.startsWith('cf-') || lk.startsWith('x-forwarded') || lk === 'cdn-loop' || lk === 'true-client-ip' || lk === 'x-real-ip') {
+      incoming.push(k + ': ' + v);
+    }
+  }
+  const p = await Promise.all([diagProbe(event, 'app'), diagProbe(event, 'minimal'), diagProbe(event, 'forged')]);
+  const app = p[0], mini = p[1], forged = p[2];
+
+  const verdictOf = (pr) => pr.error ? 'fetch failed' : (pr.status === 200 ? 'answered normally (200)' :
+    (pr.status === 403 || pr.status === 429 ? 'BLOCKED (' + pr.status + ')' : 'HTTP ' + pr.status));
+
+  let verdict, verdictColor;
+  if (app.error || app.status !== 200) {
+    if (!app.error && (app.status === 403 || app.status === 429)) {
+      verdict = 'z.ai is BLOCKING this worker\u2019s requests (HTTP ' + app.status + '). That block page is what the app shows. Send this whole page to whoever helps you.';
+      verdictColor = '#F87171';
+    } else {
+      verdict = 'The worker could not fetch the app page from ' + esc(chatHost(event)) + ' (' + esc(app.error ? app.detail : 'HTTP ' + app.status) + '). The app cannot work until this is fixed.';
+      verdictColor = '#F87171';
+    }
+  } else if (!forged.error && (forged.status === 403 || forged.status === 429)) {
+    verdict = 'z.ai answers normally, but blocks the OLD v2-style request (with forwarded Cloudflare headers). Your v3 fix is exactly right \u2014 keep it deployed.';
+    verdictColor = '#FBBF24';
+  } else {
+    verdict = 'z.ai answers this worker normally. If the app still shows a block page, the block is NOT between this worker and z.ai \u2014 it is between your phone and this worker (network filter / browser). Try this page from a different network (Wi-Fi vs mobile data) to compare.';
+    verdictColor = '#4ADE80';
+  }
+
+  const probeRow = (name, desc, pr) =>
+    '<div class="probe"><div class="ph"><b>' + name + '</b><span class="code">' + esc(desc) + '</span></div>' +
+    '<div class="line">status: <b class="' + (pr.error ? 'bad' : (pr.status === 200 ? 'ok' : (pr.status === 403 || pr.status === 429 ? 'bad' : 'warn'))) + '">' + esc(verdictOf(pr)) + '</b></div>' +
+    (pr.error ? '<div class="line">error: ' + esc(pr.detail) + '</div>' :
+      '<div class="line meta">type ' + esc(pr.type) + ' \u00b7 server ' + esc(pr.server) + ' \u00b7 cf-ray ' + esc(pr.ray) +
+      (pr.mitigated ? ' \u00b7 cf-mitigated ' + esc(pr.mitigated) : '') +
+      (pr.location ? ' \u00b7 location ' + esc(pr.location) : '') + '</div>' +
+      '<div class="snip">' + esc(pr.snippet) + '</div>') +
+    '</div>';
+
+  const html = '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
+    '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">' +
+    '<title>z.ai pocket \u2014 worker diagnostics</title>' +
+    '<style>' +
+    ':root{--bg:#0B0D12;--panel:#14161F;--panel2:#1A1D28;--line:rgba(255,255,255,.08);--txt:#E7E9EE;--sub:#9AA1AD}' +
+    '*{box-sizing:border-box}body{margin:0;padding:18px 14px 40px;background:var(--bg);color:var(--txt);font-family:-apple-system,BlinkMacSystemFont,system-ui,"Segoe UI",Roboto,sans-serif;font-size:14px;line-height:1.55}' +
+    'h1{font-size:18px;margin:0 0 2px}.tag{color:var(--sub);font-size:12.5px;margin-bottom:14px}' +
+    '.verdict{padding:12px 14px;border-radius:12px;background:rgba(255,255,255,.05);border-left:3px solid ' + verdictColor + ';margin-bottom:14px;font-size:13.5px}' +
+    '.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:13px 14px;margin-bottom:12px}' +
+    '.card b{font-size:13px}.card .code,.snip{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;color:#B9B6FB;word-break:break-all}' +
+    '.probe{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:13px 14px;margin-bottom:12px}' +
+    '.ph{display:flex;justify-content:space-between;gap:10px;align-items:baseline;margin-bottom:6px}' +
+    '.ph .code{color:var(--sub);font-size:10.5px}' +
+    '.line{font-size:12.5px;color:#C4C9D4;margin:2px 0}.line b{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}' +
+    '.ok{color:#4ADE80}.bad{color:#F87171}.warn{color:#FBBF24}' +
+    '.meta{color:var(--sub)}.snip{margin-top:7px;padding:9px 10px;border-radius:9px;background:var(--panel2);border:1px solid var(--line);max-height:110px;overflow:hidden}' +
+    'ul{margin:6px 0 0;padding-left:18px}li{font-size:12px;color:var(--sub);margin:3px 0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all}' +
+    '.foot{color:var(--sub);font-size:11.5px;line-height:1.6}' +
+    '</style></head><body>' +
+    '<h1>z.ai pocket \u2014 worker diagnostics</h1>' +
+    '<div class="tag">' + esc(VERSION) + ' \u00b7 ' + esc(new Date().toISOString()) + '</div>' +
+    '<div class="verdict">' + esc(verdict) + '</div>' +
+    probeRow('Probe 1 \u00b7 as the app (v3 style)', 'browser-like, CF headers stripped', app) +
+    probeRow('Probe 2 \u00b7 minimal', 'accept + user-agent + origin only', mini) +
+    probeRow('Probe 3 \u00b7 old v2 style', 'browser-like + forwarded CF headers', forged) +
+    '<div class="card"><b>What your request arrived with</b>' +
+    (incoming.length ? '<ul>' + incoming.map((l) => '<li>' + esc(l) + '</li>').join('') + '</ul>' :
+      '<ul><li>(no Cloudflare edge headers seen \u2014 this request did not come through a Cloudflare edge)</li></ul>') +
+    '<div class="foot">These headers were what v2 wrongly forwarded to z.ai. v3 strips them; Probe 3 shows what z.ai thinks of them.</div></div>' +
+    '<div class="foot">This page made three live calls to ' + esc(chatUpstream(event)) + '/ from inside the worker. It works with or without the PROXY_TOKEN, in any cookie state.</div>' +
+    '</body></html>';
+
+  return new Response(html, { status: 200, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } });
 }
 
 /* map a Location header value into proxy space */
