@@ -1,8 +1,8 @@
 /* ============================================================
  * z.ai pocket — Cloudflare Worker relay — worker.js
- * BUILD: zp service 6.3 (the current one-and-only build)
+ * BUILD: zp service 6.4 (the current one-and-only build)
  *   Deploy check: /__status on the worker URL must answer
- *   "zp service 6.3" — if it says 6.0, 6.1 or 6.2, an old copy is
+ *   "zp service 6.4" — if it says 6.0 … 6.3, an old copy is
  *   still deployed; replace it with this file.
  * ------------------------------------------------------------
  * WHAT THIS DOES (v5 — the "no-navigation" architecture)
@@ -92,6 +92,30 @@
  *        session). Together with the pocket v6.4 session-restore fix
  *        this heals "model not selected" AND keeps logins alive across
  *        reopens.
+ *   v6.4 — THE REAL MODEL-PICKER FIX + NO-MORE-SPURIOUS-LOGOUTS. Live
+ *        tracing against the real app found the ACTUAL boot killer the
+ *        6.3 retries could never touch: z.ai's inline boot script builds
+ *        ONE shared headers object for its auths/config/models/settings
+ *        fetches, and the runtime's old skip-if-present x-cookie logic
+ *        kept the FIRST call's cookie snapshot baked into that shared
+ *        object — so /api/models sailed out with pre-session cookies
+ *        and z.ai's Aliyun edge 403'd it ("No models found" in the
+ *        picker, "Model not selected" on send). Worse, the same 403
+ *        on the account-settings page's auths call rejected the
+ *        session promise, and the app renders itself as a GUEST —
+ *        "settings → Account redirects, fails, back home, logged
+ *        out". TWO fixes: (1) the runtime now ALWAYS refreshes the
+ *        x-cookie header from the live jar (never trusts a stale
+ *        snapshot on a shared Headers object); (2) the worker recovers
+ *        401/403 on chat /api/ GETs SERVER-SIDE and invisibly — it
+ *        takes the fresh cookies the refusal just issued, re-runs
+ *        /api/v1/auths/ with them merged (renewing token + WAF
+ *        cookies), retries the original call with everything merged
+ *        (Authorization kept), and re-issues the gathered cookies on
+ *        the response so the sandbox jar heals too. Verified end-to-
+ *        end: a fully-stale jar now walks through the recovery and
+ *        gets the complete model list (glm-5.3, glm-5.3-flash,
+ *        glm-5.2 …) back with HTTP 200.
  *
  * DEPLOY (you already have a worker)
  *   1. dash.cloudflare.com → Workers & Pages → your worker
@@ -137,7 +161,7 @@
  *     them as x-cookie. Nothing is stored at this origin.
  * ============================================================ */
 
-const VERSION = 'zp service 6.3';
+const VERSION = 'zp service 6.4';
 
 /* z.ai first-party family (suffix match — covers subdomains) */
 const ALLOW = [
@@ -676,8 +700,17 @@ const PATCH_JS = [
 "  /* ---------- header injection ---------- */",
 "  function applyHeaders(h) {",
 "    try {",
+"      /* v6.4: ALWAYS refresh x-cookie with the current jar. The z.ai",
+"       * boot script shares ONE headers object across its auths / config /",
+"       * models / settings fetches; v6.3's skip-if-present kept the FIRST",
+"       * call's cookie snapshot baked into that shared object, so /api/models",
+"       * sailed out with pre-auth cookies and the Aliyun WAF 403'd it - the",
+"       * model picker then showed \"No models found\" for the whole session.",
+"       * x-cookie is this runtime's own header (no site code sets it), so",
+"       * overwriting it is always safe and always freshest. */",
 "      var ch = cookieHeader();",
-"      if (ch && !h.has('x-cookie')) h.set('x-cookie', ch);",
+"      if (ch) h.set('x-cookie', ch);",
+"      else { try { h.delete('x-cookie'); } catch (eDel) { /* ignore */ } }",
 "      if (TOKEN && !h.has('x-proxy-token')) h.set('x-proxy-token', TOKEN);",
 "    } catch (e) { /* ignore */ }",
 "    return h;",
@@ -808,6 +841,17 @@ const PATCH_JS = [
 "        });",
 "        pr.then(function (r) {",
 "          try { ingestSetCookie(r.headers && r.headers.get('x-set-cookie')); } catch (e4) { /* ignore */ }",
+"          /* v6.4: the worker's session recovery healed this call by",
+"           * dropping a stale Bearer (x-zp-retry: dropauth) — clear the",
+"           * matching stale token from localStorage so the NEXT boot is",
+"           * clean instead of paying the recovery on every api call. */",
+"          try {",
+"            if (SD && r.headers && r.headers.get('x-zp-retry') === 'dropauth' &&",
+"                /\\/api\\/(models|v1\\/auths)/.test(String(iu))) {",
+"              try { localStorage.removeItem('token'); } catch (eL4) { /* ignore */ }",
+"              try { up({ type: 'ls', store: 'localStorage', k: 'token', v: null }); } catch (eU4) { /* ignore */ }",
+"            }",
+"          } catch (eDA) { /* ignore */ }",
 "        }, function () { /* network error: swallow */ });",
 "        return pr;",
 "      } catch (e) {",
@@ -1978,24 +2022,105 @@ async function handle(req, event) {
 
     let res;
     let retried = false;
+    let recoveryCookies = []; /* v6.4: fresh set-cookies gathered below */
     try {
       const fetchInit = { method: method, headers: h, redirect: 'manual' };
       if (body !== undefined) fetchInit.body = body;
       if (needDuplex) fetchInit.duplex = 'half';
       res = await fetch(upUrl.toString(), fetchInit);
-      /* ---- v3: a 403/429 on a safe GET can be a WAF trip-wire fed
-       * by leftover request headers — retry ONCE with a minimal,
-       * clean header set before relaying the block page. ---- */
-      if ((res.status === 403 || res.status === 429) && (method === 'GET' || method === 'HEAD')) {
+      /* ---- v6.4: session recovery for chat /api/ GETs ------------------
+       * z.ai's Aliyun edge answers 401/403 whenever the Cookie header is
+       * stale or missing the session token. The classic victim is the
+       * app's own boot: auths refreshes the cookies, but models/settings
+       * fire in parallel (or share one stale header object) and die —
+       * which empties the model picker ("No models found") or rejects
+       * the session promise so hard the app renders itself logged out
+       * (settings -> Account "redirects, fails, back home, logged out").
+       * Recover SERVER-SIDE, invisible to the app:
+       *   1. take the fresh cookies the 401/403 just handed out,
+       *   2. re-run /api/v1/auths/ with them merged (the app's own
+       *      session refresher — renews token + WAF cookies for guest
+       *      and logged-in sessions alike; verified it answers 200
+       *      even when every carried cookie is garbage),
+       *   3. retry the ORIGINAL request with everything merged,
+       *      keeping its Authorization header if it had one.
+       * The gathered cookies are re-issued on the final response, so
+       * the sandbox jar heals along with this one call. One attempt,
+       * GET/HEAD only — POSTs (sends) never take this path.
+       * Non-/api/ GETs keep the v3 plain clean-header retry (WAF
+       * trip-wire fed by leftover request headers). */
+      const isChatApi = host === chatHost(event) && /^\/api\//.test(upUrl.pathname);
+      if ((res.status === 401 || res.status === 403 || res.status === 429) && (method === 'GET' || method === 'HEAD')) {
         try {
-          const res2 = await fetch(upUrl.toString(), { method: method, headers: minimalHeaders(req, host), redirect: 'manual' });
-          retried = true; /* a retry attempt happened — tagged either way */
-          if (res2.status !== res.status) {
-            try { if (res.body && res.body.cancel) res.body.cancel(); } catch (e) { /* ignore */ }
-            res = res2;
-            retried = true;
+          const scFirst = typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : [];
+          if (isChatApi && res.status !== 429) {
+            const ck = mergeCookieList(
+              [req.headers.get('cookie') || '', req.headers.get('x-cookie') || ''], scFirst);
+            let scAuths = [];
+            try {
+              const rA = await fetch(new URL('/api/v1/auths/', upUrl).toString(), {
+                method: 'GET', redirect: 'manual',
+                headers: {
+                  'accept': 'application/json',
+                  'accept-encoding': 'gzip, deflate, br',
+                  'user-agent': req.headers.get('user-agent') || '',
+                  'accept-language': req.headers.get('accept-language') || 'en-US,en;q=0.9',
+                  'origin': 'https://' + host,
+                  'referer': 'https://' + host + '/',
+                  ...(ck ? { cookie: ck } : {}),
+                },
+              });
+              scAuths = typeof rA.headers.getSetCookie === 'function' ? rA.headers.getSetCookie() : [];
+              try { if (rA.body && rA.body.cancel) rA.body.cancel(); } catch (eC) { /* ignore */ }
+            } catch (eA) { /* refresh unavailable — retry with what we have */ }
+            const ck2 = mergeCookieList([ck], scAuths);
+            recoveryCookies = scFirst.concat(scAuths);
+            const h2 = minimalHeaders(req, host);
+            if (ck2) h2.set('cookie', ck2);
+            const authz = req.headers.get('authorization');
+            if (authz) h2.set('authorization', authz);
+            let res2 = await fetch(upUrl.toString(), { method: method, headers: h2, redirect: 'manual' });
+            retried = true; /* a retry attempt happened — tagged either way */
+            /* v6.4 stage 2: a 401 that SURVIVES the cookie refresh means the
+             * Bearer itself is stale — z.ai lets a bad Authorization beat
+             * perfectly good cookies. Retry once more with it dropped; the
+             * cookie session carries the call. Tag the success so the
+             * runtime patch clears the stale token from localStorage (the
+             * 6.3 client-side healing, now triggered by the worker). */
+            let dropAuth = false;
+            if (res2.status === 401 && authz) {
+              try {
+                const h3 = new Headers(h2);
+                h3.delete('authorization');
+                const res3 = await fetch(upUrl.toString(), { method: method, headers: h3, redirect: 'manual' });
+                if (res3.status !== res2.status) {
+                  try { if (res2.body && res2.body.cancel) res2.body.cancel(); } catch (eC2) { /* ignore */ }
+                  res2 = res3;
+                  dropAuth = true;
+                } else {
+                  try { if (res3.body && res3.body.cancel) res3.body.cancel(); } catch (eC3) { /* ignore */ }
+                }
+              } catch (e3b) { /* keep the stage-1 response */ }
+            }
+            if (res2.status !== res.status) {
+              try { if (res.body && res.body.cancel) res.body.cancel(); } catch (e) { /* ignore */ }
+              res = res2;
+              retried = dropAuth ? 'dropauth' : true;
+            } else {
+              try { if (res2.body && res2.body.cancel) res2.body.cancel(); } catch (e) { /* ignore */ }
+            }
           } else {
-            try { if (res2.body && res2.body.cancel) res2.body.cancel(); } catch (e) { /* ignore */ }
+            /* ---- v3: everything else — retry ONCE with a minimal, clean
+             * header set before relaying the block page. ---- */
+            const res2 = await fetch(upUrl.toString(), { method: method, headers: minimalHeaders(req, host), redirect: 'manual' });
+            retried = true; /* a retry attempt happened — tagged either way */
+            if (res2.status !== res.status) {
+              try { if (res.body && res.body.cancel) res.body.cancel(); } catch (e) { /* ignore */ }
+              res = res2;
+              retried = true;
+            } else {
+              try { if (res2.body && res2.body.cancel) res2.body.cancel(); } catch (e) { /* ignore */ }
+            }
           }
         } catch (e2) { /* keep the original response */ }
       }
@@ -2009,6 +2134,7 @@ async function handle(req, event) {
       const mapped = mapLocation(loc, upUrl, event, tokMode);
       const rh = scrubHeaders(res.headers);
       reissueCookies(res, rh, event);
+      reissueRawCookies(recoveryCookies, rh); /* v6.4 recovery cookies ride along */
       rh.set('location', mapped);
       maybeSetTokenCookie(req, rh, event);
       return new Response(null, { status: res.status, headers: corsHeaders(req, rh) });
@@ -2018,9 +2144,10 @@ async function handle(req, event) {
     const ct = (res.headers.get('content-type') || '').toLowerCase();
     const outHeaders = scrubHeaders(res.headers);
     reissueCookies(res, outHeaders, event);
+    reissueRawCookies(recoveryCookies, outHeaders); /* v6.4 recovery cookies ride along */
     maybeSetTokenCookie(req, outHeaders, event);
     outHeaders.set('x-final-url', res.url || upUrl.toString());
-    if (retried) outHeaders.set('x-zp-retry', '1');
+    if (retried) outHeaders.set('x-zp-retry', retried === 'dropauth' ? 'dropauth' : '1');
     const outCt = corsHeaders(req, outHeaders);
 
     if (ct.includes('text/html')) {
@@ -2142,6 +2269,25 @@ function mergeCookies(a, b) {
   return Array.from(seen.values()).join('; ');
 }
 
+/* ---- v6.4: cookie folding for the 401/403 session recovery ------------
+ * Fold one or more Cookie-header strings plus raw Set-Cookie strings
+ * into a single Cookie header. Set-Cookie values are eaten LAST, so the
+ * freshest upstream-issued values WIN over whatever the request carried. */
+function mergeCookieList(baseStrs, setCookies) {
+  const map = new Map();
+  const eat = (str) => {
+    String(str || '').split(';').forEach((kv) => {
+      kv = kv.trim();
+      if (!kv) return;
+      const name = kv.split('=')[0];
+      map.set(name, kv);
+    });
+  };
+  (Array.isArray(baseStrs) ? baseStrs : [baseStrs]).forEach(eat);
+  (setCookies || []).forEach((sc) => { eat(String(sc).split(';')[0]); });
+  return Array.from(map.values()).join('; ');
+}
+
 /* response headers we must not forward */
 const SCRUB = new Set(['content-security-policy', 'content-security-policy-report-only', 'x-frame-options',
   'strict-transport-security', 'cross-origin-opener-policy', 'cross-origin-embedder-policy',
@@ -2186,6 +2332,38 @@ function reissueCookies(res, h, event) {
     });
     /* expose the raw cookies so the patch/shell can mirror them */
     h.set('x-set-cookie', encodeURIComponent(JSON.stringify(raw)));
+  } catch (e) { /* ignore */ }
+}
+
+/* ---- v6.4: re-issue cookies gathered by the 401/403 session recovery ----
+ * Appends the recovery's raw Set-Cookie strings to the outgoing response
+ * (as real partitioned set-cookies AND merged into the x-set-cookie list
+ * the sandbox runtime ingests), so the jar heals along with the request. */
+function reissueRawCookies(raw, h) {
+  try {
+    if (!raw || !raw.length) return;
+    let existing = [];
+    const prev = h.get('x-set-cookie');
+    if (prev) { try { existing = JSON.parse(decodeURIComponent(prev)); } catch (eP) { existing = []; } }
+    raw.forEach((sc) => {
+      const parts = String(sc).split(';');
+      const nv = parts[0].trim();
+      if (!nv) return;
+      let expires = null, maxAge = null, httpOnly = false;
+      for (let i = 1; i < parts.length; i++) {
+        const p = parts[i].trim();
+        const k = p.split('=')[0].toLowerCase();
+        if (k === 'expires') expires = p.slice(8).trim();
+        else if (k === 'max-age') maxAge = p.slice(8).trim();
+        else if (k === 'httponly') httpOnly = true;
+      }
+      let out = nv + '; Path=/; Secure; SameSite=None; Partitioned';
+      if (expires) out += '; Expires=' + expires;
+      if (maxAge !== null && maxAge !== undefined && maxAge !== '') out += '; Max-Age=' + maxAge;
+      if (httpOnly) out += '; HttpOnly';
+      h.append('set-cookie', out);
+    });
+    h.set('x-set-cookie', encodeURIComponent(JSON.stringify(existing.concat(raw))));
   } catch (e) { /* ignore */ }
 }
 
