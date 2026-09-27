@@ -1,8 +1,8 @@
 /* ============================================================
  * z.ai pocket — Cloudflare Worker relay — worker.js
- * BUILD: zp service 6.5 (the current one-and-only build)
+ * BUILD: zp service 6.6 (the current one-and-only build)
  *   Deploy check: /__status on the worker URL must answer
- *   "zp service 6.5" — if it says 6.0 … 6.4, an old copy is
+ *   "zp service 6.6" — if it says 6.0 … 6.5, an old copy is
  *   still deployed; replace it with this file.
  * ------------------------------------------------------------
  * WHAT THIS DOES (v5 — the "no-navigation" architecture)
@@ -146,6 +146,30 @@
  *        so a stale stored token no longer logs the user out on
  *        the settings pages.
  *
+ *   v6.6 — THE CAPTCHA-SCENE FIX. z.ai gates chat completions
+ *        with an Aliyun slider captcha whose token is minted for
+ *        a SCENE ID picked at runtime: the bundle's config getter
+ *        reads `window.location.hostname === "chat.z.ai" ?
+ *        "didk33e0" : "xswyjefn"`. The compiled form is a
+ *        WHOLE-OBJECT reference — `(t = window.location) == null
+ *        ? void 0 : t.hostname` — which the v5 location-rewrite
+ *        never touched (it only rewrote `location.<prop>` member
+ *        accesses). In the sandbox `window.location` is the real
+ *        about:srcdoc location, hostname "" — so every captcha
+ *        was initialized and verified under the WRONG scene
+ *        (xswyjefn), and z.ai's backend rejected every solved
+ *        token: the user solved the slider and STILL got
+ *        "Verification required" forever. The rewrite now also
+ *        (1) maps whole-object `window.location` READS to __zaiLoc
+ *        (guarded: not after a dot/word char — so
+ *        contentWindow.location stays real — and never an
+ *        lvalue write), and (2) tolerates optional chaining
+ *        (`location?.href`) in both prefixed and bare forms, so
+ *        third-party scripts served through the relay
+ *        (AliyunCaptcha.js, FeiLin) fingerprint the page as
+ *        chat.z.ai too. Scene, referer-style checks and risk
+ *        scoring all line up with the real site now.
+ *
  * DEPLOY (you already have a worker)
  *   1. dash.cloudflare.com → Workers & Pages → your worker
  *   2. "Edit code" / Quick Edit → select all → paste this file
@@ -190,7 +214,7 @@
  *     them as x-cookie. Nothing is stored at this origin.
  * ============================================================ */
 
-const VERSION = 'zp service 6.5';
+const VERSION = 'zp service 6.6';
 
 /* z.ai first-party family (suffix match — covers subdomains) */
 const ALLOW = [
@@ -2900,18 +2924,37 @@ function rewriteCss(text, pfx, host, allow, tokDoc, workerOrigin) {
  * whole bundle. `location = X` / `window.location = X` LVALUE forms are
  * left RAW (a real navigation the shell's escape recovery catches).
  * A prop name after `location.` keeps this from ever touching bare
- * `location` reads or unrelated identifiers. */
+ * `location` reads or unrelated identifiers.
+ *
+ * v6.6 adds TWO shapes the original pass missed:
+ *   (a) optional chaining — `location?.href` / `window.location?.hash`
+ *   (b) WHOLE-OBJECT reads — `(t = window.location) == null ? void 0 :
+ *       t.hostname` — the compiled form the z.ai bundle uses for the
+ *       captcha SCENE_ID getter. Left raw, `window.location` in the
+ *       sandbox is about:srcdoc (hostname ""), and every captcha token
+ *       was minted for the wrong scene, so z.ai rejected every solve. */
 function rewriteJsLocation(text) {
   try {
     if (!/location\b/.test(text)) return text;
     let out = text;
-    /* member forms, prefixed (window/document/self/top/parent/globalThis): */
-    out = out.replace(/(?:window|document|self|top|parent|globalThis|global)\.location\.(href|assign|replace|reload|pathname|search|hash|origin|host|hostname|protocol|port|toString)\b/gi,
+    /* member forms, prefixed (window/document/self/top/parent/globalThis).
+     * v6.6: `location?.` (optional chain) rewrites the same way —
+     * __zaiLoc is never null, so the semantics only get more reliable. */
+    out = out.replace(/(?<![.\w$])(?:window|document|self|top|parent|globalThis|global)\.location\??\.(href|assign|replace|reload|pathname|search|hash|origin|host|hostname|protocol|port|toString)\b/gi,
       (w, prop) => '__zaiLoc.' + prop);
     /* bare location.<prop> — the leading (?<![.\w$]) stops it from
      * matching x.location.href (nested-frame access) or mylocation.href: */
-    out = out.replace(/(?<![.\w$])location\.(href|assign|replace|reload|pathname|search|hash|origin|host|hostname|protocol|port|toString)\b/gi,
+    out = out.replace(/(?<![.\w$])location\??\.(href|assign|replace|reload|pathname|search|hash|origin|host|hostname|protocol|port|toString)\b/gi,
       (w, prop) => '__zaiLoc.' + prop);
+    /* v6.6: whole-object `window.location` READS (not followed by a
+     * member access, not an lvalue write). Guards:
+     *   - leading (?<![.\w$]) — contentWindow.location / x.location
+     *     (real nested-frame access) stay untouched;
+     *   - (?![.\w$]) — window.locationFoo never matches;
+     *   - (?!\s*=(?!=)) — `window.location = X` writes stay REAL
+     *     (navigations the shell's escape recovery owns). */
+    out = out.replace(/(?<![.\w$])(?:window|document|self|top|parent|globalThis|global)\.location(?![.\w$])(?!\s*=(?!=))/g,
+      (w) => '__zaiLoc');
     return out;
   } catch (e) {
     return text;
