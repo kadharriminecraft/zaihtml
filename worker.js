@@ -1,8 +1,8 @@
 /* ============================================================
  * z.ai pocket — Cloudflare Worker relay — worker.js
- * BUILD: zp service 6.4 (the current one-and-only build)
+ * BUILD: zp service 6.5 (the current one-and-only build)
  *   Deploy check: /__status on the worker URL must answer
- *   "zp service 6.4" — if it says 6.0 … 6.3, an old copy is
+ *   "zp service 6.5" — if it says 6.0 … 6.4, an old copy is
  *   still deployed; replace it with this file.
  * ------------------------------------------------------------
  * WHAT THIS DOES (v5 — the "no-navigation" architecture)
@@ -117,6 +117,35 @@
  *        gets the complete model list (glm-5.3, glm-5.3-flash,
  *        glm-5.2 …) back with HTTP 200.
  *
+ *   v6.5 — THE STUCK-SEND FIX. z.ai's frontend NEVER calls
+ *        setItem('token'): all five token writes in the whole
+ *        bundle are plain property assignments
+ *        (`localStorage.token = jwt`), and the send path reads it
+ *        back with getItem at click time. The old storage shim was
+ *        a plain object, so every property write landed on a dead
+ *        JS property — the token NEVER persisted, the chat send
+ *        shipped `authorization: Bearer null` on /api/v1/chats/new,
+ *        z.ai answered 401, and the app sat on its three-dots
+ *        spinner forever ("the message never actually gets sent").
+ *        Fresh sandbox boots (settings → Account) equally found no
+ *        token and bounced the user home as a guest. THREE fixes:
+ *        (1) the shim is now a full Storage emulation (Proxy):
+ *        property get/set/delete route through getItem/setItem/
+ *        removeItem, length + key enumeration behave like the real
+ *        thing — the app's `localStorage.token = jwt` now sticks
+ *        and rides the existing ls-mirror to the shell; (2) the
+ *        server-side 401/403 session recovery now also covers
+ *        chat /api/ POSTs with replayable (buffered) bodies —
+ *        chats/new and completions refetch their session cookies
+ *        and retry instead of hanging the send; (3) auths
+ *        guest-degradation heal: z.ai lets a stale Bearer DEGRADE
+ *        an auths call to a brand-new guest session (HTTP 200) —
+ *        the worker detects the minted token differing from the
+ *        presented Bearer, retries auths WITHOUT it, and serves
+ *        the cookie-backed session (the logged-in account) back,
+ *        so a stale stored token no longer logs the user out on
+ *        the settings pages.
+ *
  * DEPLOY (you already have a worker)
  *   1. dash.cloudflare.com → Workers & Pages → your worker
  *   2. "Edit code" / Quick Edit → select all → paste this file
@@ -161,7 +190,7 @@
  *     them as x-cookie. Nothing is stored at this origin.
  * ============================================================ */
 
-const VERSION = 'zp service 6.4';
+const VERSION = 'zp service 6.5';
 
 /* z.ai first-party family (suffix match — covers subdomains) */
 const ALLOW = [
@@ -1632,13 +1661,56 @@ const PATCH_JS = [
 "    }",
 "    function makeShim(name) {",
 "      var mem = (name === 'localStorage') ? lsMirror : {};",
-"      return {",
-"        getItem: function (k) { return Object.prototype.hasOwnProperty.call(mem, k) ? mem[k] : null; },",
-"        setItem: function (k, v) { mem[k] = String(v); up({ type: 'ls', store: name, k: String(k), v: String(v) }); },",
-"        removeItem: function (k) { delete mem[k]; up({ type: 'ls', store: name, k: String(k), v: null }); },",
-"        clear: function () { mem = {}; up({ type: 'ls', store: name, k: '__clear__', v: null }); },",
+"      /* v6.5: real Storage objects accept BOTH method calls and plain",
+"       * property access. z.ai's bundle NEVER calls setItem('token'): all",
+"       * five token writes are `localStorage.token = jwt`, read back with",
+"       * getItem at send time — the old plain-object shim dropped every",
+"       * property write, so sends shipped `authorization: Bearer null`",
+"       * (401, three-dots spinner forever) and fresh sandbox boots lost",
+"       * the login. This Proxy routes property get/set/delete through the",
+"       * storage methods so the shim behaves like the real thing. */",
+"      var proto = {",
+"        getItem: function (k) { k = String(k); return Object.prototype.hasOwnProperty.call(mem, k) ? mem[k] : null; },",
+"        setItem: function (k, v) { k = String(k); mem[k] = String(v); up({ type: 'ls', store: name, k: k, v: String(v) }); },",
+"        removeItem: function (k) { k = String(k); if (Object.prototype.hasOwnProperty.call(mem, k)) { delete mem[k]; up({ type: 'ls', store: name, k: k, v: null }); } },",
+"        clear: function () { Object.keys(mem).forEach(function (k) { delete mem[k]; }); up({ type: 'ls', store: name, k: '__clear__', v: null }); },",
 "        key: function (i) { return Object.keys(mem)[i] || null; }",
 "      };",
+"      /* in-place clear() above keeps the lsMirror alias intact (boot",
+"       * hydration + shell 'init' write straight into lsMirror). */",
+"      try { Object.defineProperty(proto, 'length', { get: function () { return Object.keys(mem).length; }, configurable: true }); } catch (eLen) { /* ignore */ }",
+"      var target = Object.create(proto);",
+"      try {",
+"        return new Proxy(target, {",
+"          get: function (t, p) {",
+"            if (typeof p === 'symbol') return t[p];",
+"            if (Object.prototype.hasOwnProperty.call(mem, p)) return mem[p];",
+"            var v = t[p];",
+"            return (v === undefined && p !== 'length') ? null : v;",
+"          },",
+"          set: function (t, p, v) {",
+"            if (typeof p === 'symbol') { t[p] = v; return true; }",
+"            proto.setItem(p, v);",
+"            return true;",
+"          },",
+"          deleteProperty: function (t, p) {",
+"            if (typeof p === 'symbol') { delete t[p]; return true; }",
+"            if (Object.prototype.hasOwnProperty.call(mem, p)) proto.removeItem(p);",
+"            return true;",
+"          },",
+"          has: function (t, p) {",
+"            if (typeof p === 'symbol') return p in t;",
+"            return Object.prototype.hasOwnProperty.call(mem, p) || (p in t);",
+"          },",
+"          ownKeys: function (t) { return Object.keys(mem); },",
+"          getOwnPropertyDescriptor: function (t, p) {",
+"            if (typeof p === 'string' && Object.prototype.hasOwnProperty.call(mem, p)) {",
+"              return { value: mem[p], writable: true, enumerable: true, configurable: true };",
+"            }",
+"            return undefined;",
+"          }",
+"        });",
+"      } catch (ePx) { return target; } /* engine without Proxy: method-only fallback */",
 "    }",
 "    ['localStorage', 'sessionStorage'].forEach(function (name) {",
 "      var native = null;",
@@ -2045,12 +2117,80 @@ async function handle(req, event) {
        *   3. retry the ORIGINAL request with everything merged,
        *      keeping its Authorization header if it had one.
        * The gathered cookies are re-issued on the final response, so
-       * the sandbox jar heals along with this one call. One attempt,
-       * GET/HEAD only — POSTs (sends) never take this path.
+       * the sandbox jar heals along with this one call. One attempt;
+       * GET/HEAD always, plus v6.5 chat-/api/ POSTs with replayable
+       * (buffered) bodies — the send pipeline's /api/v1/chats/new and
+       * the completions POST recover the same way instead of hanging
+       * the send on a 401 (three-dots spinner forever).
        * Non-/api/ GETs keep the v3 plain clean-header retry (WAF
        * trip-wire fed by leftover request headers). */
       const isChatApi = host === chatHost(event) && /^\/api\//.test(upUrl.pathname);
-      if ((res.status === 401 || res.status === 403 || res.status === 429) && (method === 'GET' || method === 'HEAD')) {
+      /* ---- v6.5: auths guest-degradation heal ---------------------------
+       * z.ai answers a GET /api/v1/auths/ carrying a STALE Bearer by
+       * silently minting a GUEST session (HTTP 200) — for a logged-in
+       * account that renders the app as logged out ("settings -> Account:
+       * back home, signed out"). Detection must be identity-based: z.ai
+       * ROTATES the token on every auths call (verified live), so a fresh
+       * token alone is normal. Decode the presented Bearer's JWT id and
+       * compare with the response's id — a CHANGED id is real degradation.
+       * Then retry WITHOUT the Authorization: the cookies are the truth.
+       * Heal when the retry is better: a non-guest role (the account), or a
+       * DIFFERENT id (the cookie session's continuity restored). */
+      const authzHdr = req.headers.get('authorization');
+      if (isChatApi && method === 'GET' && /^\/api\/v1\/auths\/?$/.test(upUrl.pathname) && authzHdr &&
+          res.status === 200 && (res.headers.get('content-type') || '').toLowerCase().includes('json')) {
+        try {
+          const resProbe = res.clone();
+          const dgTxt = await resProbe.text();
+          let dg = null; try { dg = JSON.parse(dgTxt); } catch (eDgP) { dg = null; }
+          const bearerVal = String(authzHdr).replace(/^\s*Bearer\s+/i, '');
+          let bearerId = '??';
+          try {
+            const pl = String(bearerVal).split('.')[1];
+            if (pl) {
+              const b64 = pl.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (pl.length % 4)) % 4);
+              const dec = JSON.parse(atob(b64));
+              if (dec && dec.id) bearerId = String(dec.id);
+            }
+          } catch (eId) { bearerId = '??'; }
+          if (dg && dg.role === 'guest' && dg.token && dg.id && dg.id !== bearerId) {
+            /* CRITICAL: the retry must carry the ORIGINAL request cookies —
+             * NOT merged with the degraded response's set-cookies (those are
+             * the freshly-minted stranger's; merging them would make the
+             * retry return the stranger again and the heal could never
+             * fire). Escape the stranger, ask the cookies what they say. */
+            const ckDg = mergeCookies(req.headers.get('cookie') || '', req.headers.get('x-cookie') || '');
+            const hDg = minimalHeaders(req, host);
+            hDg.delete('authorization');
+            hDg.set('accept', 'application/json');
+            if (ckDg) hDg.set('cookie', ckDg);
+            const rDg = await fetch(upUrl.toString(), { method: 'GET', headers: hDg, redirect: 'manual' });
+            const scDg2 = typeof rDg.headers.getSetCookie === 'function' ? rDg.headers.getSetCookie() : [];
+            let dg2 = null;
+            try { dg2 = JSON.parse(await rDg.text()); } catch (eDgP2) { dg2 = null; }
+            /* heal when the retry beats the degraded answer: a real account
+             * (role != guest) or a different session id (cookie continuity
+             * restored). Tokens rotate, so only id/role can be compared. */
+            if (dg2 && dg2.token && (dg2.role !== 'guest' || dg2.id !== dg.id)) {
+              /* healed — serve the cookie-backed session; only the HEALED
+               * session's cookies ride along (the stranger's must not). */
+              recoveryCookies = scDg2;
+              res = new Response(JSON.stringify(dg2), { status: rDg.status, headers: rDg.headers });
+              retried = 'dropauth';
+            }
+            /* else: the degraded answer already carries the cookie identity
+             * — keep it (no heal, no tag) */
+          }
+        } catch (eDg) { /* probe failed — the original response stays */ }
+      }
+      const isRead = method === 'GET' || method === 'HEAD';
+      /* v6.5 POST recovery: only chat-/api/ POSTs whose body was BUFFERED
+       * (an ArrayBuffer — duck-typed: workerd's request ArrayBuffers can
+       * live in another realm, so `instanceof` lies cross-realm) can be
+       * replayed; streamed (duplex) bodies are passed through untouched. */
+      const postReplay = !isRead && isChatApi && res.status !== 429 &&
+        body != null && typeof body.byteLength === 'number';
+      if ((res.status === 401 || res.status === 403 || res.status === 429) && (isRead || postReplay)) {
         try {
           const scFirst = typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : [];
           if (isChatApi && res.status !== 429) {
@@ -2079,7 +2219,15 @@ async function handle(req, event) {
             if (ck2) h2.set('cookie', ck2);
             const authz = req.headers.get('authorization');
             if (authz) h2.set('authorization', authz);
-            let res2 = await fetch(upUrl.toString(), { method: method, headers: h2, redirect: 'manual' });
+            const retryInit = { method: method, headers: h2, redirect: 'manual' };
+            if (!isRead) {
+              /* v6.5 POST recovery: replay the buffered body + its
+               * content-type (minimalHeaders does not carry it). */
+              retryInit.body = body;
+              const rct = req.headers.get('content-type');
+              if (rct) h2.set('content-type', rct);
+            }
+            let res2 = await fetch(upUrl.toString(), retryInit);
             retried = true; /* a retry attempt happened — tagged either way */
             /* v6.4 stage 2: a 401 that SURVIVES the cookie refresh means the
              * Bearer itself is stale — z.ai lets a bad Authorization beat
@@ -2092,7 +2240,9 @@ async function handle(req, event) {
               try {
                 const h3 = new Headers(h2);
                 h3.delete('authorization');
-                const res3 = await fetch(upUrl.toString(), { method: method, headers: h3, redirect: 'manual' });
+                const retryInit3 = { method: method, headers: h3, redirect: 'manual' };
+                if (!isRead) retryInit3.body = body;
+                const res3 = await fetch(upUrl.toString(), retryInit3);
                 if (res3.status !== res2.status) {
                   try { if (res2.body && res2.body.cancel) res2.body.cancel(); } catch (eC2) { /* ignore */ }
                   res2 = res3;
