@@ -1,5 +1,9 @@
 /* ============================================================
- * z.ai pocket — Cloudflare Worker relay (v5)
+ * z.ai pocket — Cloudflare Worker relay — worker.js
+ * BUILD: zp service 6.2 (the current one-and-only build)
+ *   Deploy check: /__status on the worker URL must answer
+ *   "zp service 6.2" — if it says 6.0 or 6.1, an old copy is
+ *   still deployed; replace it with this file.
  * ------------------------------------------------------------
  * WHAT THIS DOES (v5 — the "no-navigation" architecture)
  *   The phone's browser NEVER opens this worker as a web page.
@@ -38,6 +42,38 @@
  *        the sandbox frame. (4) /__status gains "entry": the
  *        tokenized root-document path, so the pocket file can
  *        boot the app without knowing the token key.
+ *   v6 — credentialed CORS (origin echo + allow-credentials),
+ *        path-preserving /__o/ handles with an injected base tag,
+ *        cookie jar relayed via x-set-cookie / x-cookie so
+ *        sign-in survives the null-origin sandbox.
+ *   v6.1 — CORS FIX FOR REAL PHONES: v6 only echoed Origin: null
+ *        back, so a pocket file opened through a viewer app that
+ *        serves it from http://localhost:PORT (or any custom
+ *        scheme) got Access-Control-Allow-Origin:* on its very
+ *        first credentialed document fetch — the browser kills
+ *        that response instantly ("Could not reach the app") while
+ *        /__status (credentials:'omit') answers fine. Now ANY
+ *        well-formed Origin is echoed with allow-credentials, and
+ *        the sandbox runtime patch strips credentials:'include'
+ *        (cookies already ride on x-cookie) so in-frame api calls
+ *        can never trip credentialed-CORS rules either. The pocket
+ *        (v6.2) additionally retries document loads in omit mode
+ *        with the jar on x-cookie, so a load works from ANY origin
+ *        on ANY browser, no matter how it handles credentials.
+ *   v6.2 — STREAM/SEND HARDENING: (1) text/event-stream responses
+ *        now pass through with x-accel-buffering:no + no-store so
+ *        no CDN hop decides to buffer a live agent stream, and the
+ *        upstream request for stream calls asks for identity
+ *        encoding (some upstreams sit on gzip'd SSE). (2) The
+ *        sandbox runtime patch ALSO strips credentials:'include'
+ *        from Request-object fetches (v6.1 only covered the plain
+ *        init form) and forces XHR withCredentials=false in sandbox
+ *        mode — the z.ai app sends /api/config, /api/v1/auths and
+ *        the sign-in call WITH credentials:"include", and fragile
+ *        mobile webviews kill those at the network level, which
+ *        silently breaks the chat-send flow (models/settings never
+ *        load, the send button never arms). Deploying this version
+ *        is REQUIRED for sending prompts on such phones.
  *
  * DEPLOY (you already have a worker)
  *   1. dash.cloudflare.com → Workers & Pages → your worker
@@ -83,7 +119,7 @@
  *     them as x-cookie. Nothing is stored at this origin.
  * ============================================================ */
 
-const VERSION = 'zp service 6.0';
+const VERSION = 'zp service 6.2';
 
 /* z.ai first-party family (suffix match — covers subdomains) */
 const ALLOW = [
@@ -92,7 +128,12 @@ const ALLOW = [
   'chatglm.site',       // artifacts-cdn, adapter-prod, test envs
   'glm-chat.oss-cn-hongkong.aliyuncs.com', // file upload/download bucket
   'alicdn.com',         // o.alicdn.com — z.ai's shared frontend libs (jquery …)
-  'aliyuncs.com'        // sdk.rum / log endpoints the z.ai frontend loads at boot
+  'aliyuncs.com',       // sdk.rum / log endpoints the z.ai frontend loads at boot
+  'filebin.net'         // v6.2: delivery host for the copier's file mirrors —
+                        // browsers get an HTML wrapper from it directly, but a
+                        // server-side fetch (this worker) receives the raw
+                        // bytes, so the copier pulls its payloads through
+                        // /p/filebin.net/<bin>/<file> and they arrive green.
 ];
 
 /* ---- v4: opaque request tokens ----------------------------------------
@@ -634,11 +675,37 @@ const PATCH_JS = [
 "          if (mapped !== input.url) {",
 "            try { input = new Request(absW(mapped), input); } catch (e2) { /* keep original */ }",
 "          }",
+"          /* v6.2: a Request OBJECT built with credentials:'include' is",
+"           * the one fragile-webview path the init-form strip below can",
+"           * never reach (its credentials live inside the object). In",
+"           * sandbox mode rebuild it omit-mode — cookies ride on",
+"           * x-cookie, 'include' buys nothing and trips credentialed-CORS",
+"           * rules on strict mobile webviews. */",
+"          if (SD) {",
+"            try {",
+"              var R0 = (input && typeof input === 'object' && typeof input.url === 'string') ? input : null;",
+"              if (R0 && R0.credentials === 'include') {",
+"                var iOpt = { method: R0.method, headers: R0.headers, credentials: 'omit',",
+"                  cache: R0.cache, redirect: R0.redirect, referrer: R0.referrer, integrity: R0.integrity };",
+"                if (R0.method !== 'GET' && R0.method !== 'HEAD') { iOpt.body = R0.body; iOpt.duplex = 'half'; }",
+"                input = new Request(R0.url, iOpt);",
+"              }",
+"            } catch (eCR) { /* keep the include-mode request */ }",
+"          }",
 "        } else if (typeof input === 'string' || input instanceof URL) {",
 "          var u2 = mapUrl(String(input));",
 "          if (u2 !== String(input)) input = absW(u2);",
 "        }",
 "        init = init || {};",
+"        /* v6.1: in sandbox mode (null-origin srcdoc) credentialed",
+"         * fetches are the fragile path — some mobile browsers and",
+"         * viewer-app webviews refuse them outright. The session",
+"         * already rides on the x-cookie header this wrapper sets,",
+"         * so 'include' adds nothing here: strip it to 'omit' and the",
+"         * request passes with a plain wildcard allow-origin too. */",
+"        if (SD && init.credentials === 'include') {",
+"          try { init.credentials = 'omit'; } catch (eC1) { /* keep */ }",
+"        }",
 "        var H;",
 "        try { H = (init.headers instanceof Headers) ? init.headers : new Headers(init.headers || {}); }",
 "        catch (e3) { H = new Headers(); }",
@@ -674,6 +741,10 @@ const PATCH_JS = [
 "    var _send = XMLHttpRequest.prototype.send;",
 "    XMLHttpRequest.prototype.send = function () {",
 "      try {",
+"        /* v6.1: same reasoning as the fetch wrapper — in sandbox mode",
+"         * withCredentials buys nothing (cookies ride on x-cookie) and",
+"         * trips credentialed-CORS rules on fragile webviews. */",
+"        if (SD) { try { this.withCredentials = false; } catch (eWC) { /* keep */ } }",
 "        var ch = cookieHeader();",
 "        if (ch) this.setRequestHeader('x-cookie', ch);",
 "        if (TOKEN) this.setRequestHeader('x-proxy-token', TOKEN);",
@@ -1769,6 +1840,30 @@ async function handle(req, event) {
       h.set(k, v);
     }
     h.set('accept-encoding', 'gzip, deflate, br');
+    /* v6.2: filebin (the copier's delivery host) serves a browser HTML
+     * wrapper to any browser-shaped User-Agent and the raw bytes to plain
+     * HTTP clients — and this worker forwards the caller's UA. For
+     * filebin requests only, claim a plain client UA so the payloads the
+     * copier pulls through /p/filebin.net/… arrive as raw bytes. */
+    const isFilebin = host && (host.toLowerCase() === 'filebin.net' || host.toLowerCase().endsWith('.filebin.net'));
+    if (isFilebin) {
+      /* filebin hands the raw file ONLY to curl-shaped clients (verified:
+       * curl/* -> 302 raw; wget, python-requests, any browser -> 200 HTML
+       * wrapper). Claim a curl identity for these delivery fetches. */
+      h.set('user-agent', 'curl/8.5.0');
+      h.set('accept', '*/*');
+    }
+    /* v6.2: stream calls (the app's completions/continue SSE posts
+     * carry Accept: text/event-stream) ask the upstream for IDENTITY
+     * encoding — a compressed event-stream is a stream some upstream
+     * CDNs feel licensed to buffer, and decompress-then-buffer shows
+     * up on the phone as "the answer never arrives". */
+    try {
+      const acc = (req.headers.get('accept') || '').toLowerCase();
+      if (acc.includes('text/event-stream')) {
+        h.set('accept-encoding', 'identity');
+      }
+    } catch (eAE) { /* keep */ }
     h.set('cookie', mergeCookies(req.headers.get('cookie') || '', req.headers.get('x-cookie') || ''));
     h.set('origin', 'https://' + host);
     h.set('referer', 'https://' + host + '/');
@@ -1834,6 +1929,12 @@ async function handle(req, event) {
     const outCt = corsHeaders(req, outHeaders);
 
     if (ct.includes('text/html')) {
+      /* v6.2: filebin (delivery host) labels EVERY file text/html — the
+       * pocket payload must pass through byte-exact, never rewritten. */
+      const isFb = host === 'filebin.net' || String(host || '').toLowerCase().endsWith('.filebin.net');
+      if (isFb) {
+        return new Response(res.body, { status: res.status, headers: outCt });
+      }
       const text = await res.text();
       const html = rewriteHtml(text, pfx, host, new URL(req.url).origin, token, allowList(event),
         tokMode ? upUrl.toString() : null);
@@ -1866,6 +1967,17 @@ async function handle(req, event) {
         return new Response(js, { status: res.status, headers: h2 });
       }
       return new Response(text, { status: res.status, headers: outCt });
+    }
+
+    /* ---- v6.2: event-stream passthrough hardening ----------------
+     * The completions/continue SSE responses pass through UNTOUCHED
+     * (res.body streams chunk-for-chunk — verified). These two extra
+     * headers tell any intermediary that may still sit between this
+     * worker and the phone (corp proxies, mobile carriers, CDNs) not
+     * to buffer a live stream, and keep it out of every cache. */
+    if (ct.includes('text/event-stream')) {
+      outHeaders.set('x-accel-buffering', 'no');
+      outHeaders.set('cache-control', 'no-store');
     }
 
     return new Response(res.body, { status: res.status, headers: outCt });
@@ -1983,19 +2095,27 @@ function reissueCookies(res, h, event) {
 }
 
 function corsHeaders(req, h) {
-  /* v6: credentialed CORS. The z.ai app calls EVERY api with
-   * credentials:"include" — and a browser REFUSES
+  /* v6.1: credentialed CORS for EVERY caller. The z.ai app calls
+   * EVERY api with credentials:"include" — and a browser REFUSES
    * Access-Control-Allow-Origin:* on credentialed cross-origin fetches,
    * which silently killed signin / chat-send inside the sandbox while
-   * the worker happily logged 200s. Echo the origin back — browsers
-   * send "null" for both the saved file:// pocket and its sandboxed
-   * srcdoc frame — plus allow-credentials so cookies actually flow.
-   * Anything else (random websites) keeps the wildcard WITHOUT
-   * credentials. */
+   * the worker happily logged 200s. Echo the origin back plus
+   * allow-credentials so cookies actually flow.
+   *
+   * v6 echoed ONLY Origin: null — but phones open the saved pocket
+   * file through viewer apps that serve it from http://localhost:PORT
+   * or a custom app scheme, and those origins got the wildcard, so the
+   * very first credentialed document fetch died with a network error
+   * while the credentials:'omit' health probe answered fine
+   * ("Could not reach the app"). Now ANY well-formed Origin is echoed.
+   * No-Origin (server-to-server) requests keep the wildcard. */
   const org = (req.headers.get('origin') || '').trim();
-  let self = '';
-  try { self = new URL(req.url).origin; } catch (e) { /* ignore */ }
-  if (org && (org === 'null' || org === self)) {
+  /* echo only origins a browser could legally send — printable ASCII,
+   * scheme://… shape — never let a hostile header value become an
+   * invalid response header */
+  const echoable = org === 'null' ||
+    (org.length > 0 && org.length < 256 && /^[!-~]+$/.test(org) && org.indexOf('://') > 0);
+  if (org && echoable) {
     h.set('access-control-allow-origin', org);
     h.set('access-control-allow-credentials', 'true');
   } else {
