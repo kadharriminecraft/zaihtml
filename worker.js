@@ -1,8 +1,8 @@
 /* ============================================================
  * z.ai pocket — Cloudflare Worker relay — worker.js
- * BUILD: zp service 6.2 (the current one-and-only build)
+ * BUILD: zp service 6.3 (the current one-and-only build)
  *   Deploy check: /__status on the worker URL must answer
- *   "zp service 6.2" — if it says 6.0 or 6.1, an old copy is
+ *   "zp service 6.3" — if it says 6.0, 6.1 or 6.2, an old copy is
  *   still deployed; replace it with this file.
  * ------------------------------------------------------------
  * WHAT THIS DOES (v5 — the "no-navigation" architecture)
@@ -74,6 +74,24 @@
  *        silently breaks the chat-send flow (models/settings never
  *        load, the send button never arms). Deploying this version
  *        is REQUIRED for sending prompts on such phones.
+ *   v6.3 — MODEL PICKER + STALE-TOKEN RECOVERY: the z.ai boot script
+ *        caches a GLOBAL_FETCHES.models promise and sends the localStorage
+ *        'token' as a Bearer on it; when that token is from an OLD login
+ *        (saved session restored, cookies fresh) upstream answers 401 and
+ *        the cached rejection leaves the model picker EMPTY all session
+ *        ("Model not selected", nothing clickable). The runtime now (1)
+ *        PRESERVES Request-object headers on fetch(Request) calls (the
+ *        wrapper used to replace them, dropping Authorization), (2)
+ *        retries a 401 GET /api/ call that carried Authorization ONCE
+ *        with the header dropped — on models/auths success the stale
+ *        token is cleared so the next boot is clean, and (3) retries a
+ *        network-LEVEL failure of a first-boot GET /api/ call once after
+ *        a short delay (fresh sandbox boots queue those calls behind a
+ *        wall of analytics beacons and one dead fetch would otherwise
+ *        poison the app's cached session/models promises for the whole
+ *        session). Together with the pocket v6.4 session-restore fix
+ *        this heals "model not selected" AND keeps logins alive across
+ *        reopens.
  *
  * DEPLOY (you already have a worker)
  *   1. dash.cloudflare.com → Workers & Pages → your worker
@@ -119,7 +137,7 @@
  *     them as x-cookie. Nothing is stored at this origin.
  * ============================================================ */
 
-const VERSION = 'zp service 6.2';
+const VERSION = 'zp service 6.3';
 
 /* z.ai first-party family (suffix match — covers subdomains) */
 const ALLOW = [
@@ -707,14 +725,91 @@ const PATCH_JS = [
 "          try { init.credentials = 'omit'; } catch (eC1) { /* keep */ }",
 "        }",
 "        var H;",
-"        try { H = (init.headers instanceof Headers) ? init.headers : new Headers(init.headers || {}); }",
-"        catch (e3) { H = new Headers(); }",
+"        try {",
+"          if (init.headers) {",
+"            H = (init.headers instanceof Headers) ? init.headers : new Headers(init.headers);",
+"          } else if (input && typeof input === 'object' && typeof input.headers !== 'undefined') {",
+"            /* v6.3: a fetch(Request) call. Setting init.headers below would",
+"             * REPLACE the Request's own headers per spec, silently dropping",
+"             * the app's Authorization on every Request-object call. Merge",
+"             * the Request's headers into H instead. */",
+"            H = new Headers();",
+"            try { input.headers.forEach(function (v, k) { H.set(k, v); }); } catch (eIH) { /* ignore */ }",
+"          } else { H = new Headers(); }",
+"        } catch (e3) { H = new Headers(); }",
 "        init.headers = applyHeaders(H);",
+"        var iu = '';",
+"        try { iu = (typeof input === 'string') ? input : (input && typeof input.url === 'string') ? input.url : ''; } catch (eIU) { iu = ''; }",
+"        var meth = 'GET';",
+"        try { meth = (init && init.method) || (input && input.method) || 'GET'; } catch (eM) { meth = 'GET'; }",
+"        var hadAuth = false;",
+"        try { if (init.headers && init.headers.get && init.headers.get('authorization')) hadAuth = true; } catch (eHA) { /* ignore */ }",
 "        var p = _fetch(input, init);",
-"        p.then(function (r) {",
+"        /* v6.3: network-level retry for first-boot GET api calls. On a",
+"         * fresh sandbox boot the app's auths/models/config fetches",
+"         * queue behind 15+ analytics beacons on a null-origin context",
+"         * and occasionally die at the network level - and the app CACHES",
+"         * those rejected GLOBAL_FETCHES promises, so one dead call leaves",
+"         * the session/models empty for the whole session (\"Model not",
+"         * selected\"). One delayed GET-only retry before the rejection",
+"         * is allowed through. */",
+"        var isApiGet = /^GET$/i.test(meth) && /\\/api\\//.test(String(iu));",
+"        var retryable = function (iR) {",
+"          var i3 = {};",
+"          for (var k3 in iR) { try { i3[k3] = iR[k3]; } catch (eK3) { /* ignore */ } }",
+"          return i3;",
+"        };",
+"        /* v6.3: stale-token recovery. The app's boot script caches a",
+"         * GLOBAL_FETCHES.models promise: a GET /api/models carrying an",
+"         * Authorization header left over from an OLD login answers 401",
+"         * even with a perfectly good cookie session, and that cached",
+"         * rejection leaves the model picker empty all session (\"Model",
+"         * not selected\"). Retry such calls ONCE with Authorization",
+"         * dropped - cookies ride on x-cookie - and when the retry",
+"         * succeeds on models/auths, clear the stale token so the next",
+"         * boot is clean. */",
+"        var pr = p.then(function (r) {",
+"          try {",
+"            if (SD && r.status === 401 && hadAuth && /^GET$/i.test(meth) && /\\/api\\//.test(String(iu))) {",
+"              var i2 = {};",
+"              for (var kk in init) { try { i2[kk] = init[kk]; } catch (eK) { /* ignore */ } }",
+"              var H2 = new Headers(init.headers || {});",
+"              H2.delete('authorization');",
+"              i2.headers = H2;",
+"              return _fetch(iu, i2).then(function (r2) {",
+"                try {",
+"                  if (r2 && r2.ok) {",
+"                    try { ingestSetCookie(r2.headers && r2.headers.get('x-set-cookie')); } catch (e5) { /* ignore */ }",
+"                    if (/\\/api\\/(models|v1\\/auths)/.test(String(iu))) {",
+"                      try { localStorage.removeItem('token'); } catch (eL) { /* ignore */ }",
+"                      try { up({ type: 'ls', store: 'localStorage', k: 'token', v: null }); } catch (eU) { /* ignore */ }",
+"                    }",
+"                  }",
+"                  return r2;",
+"                } catch (eR2) { return r2; }",
+"              }, function () { return r; });",
+"            }",
+"          } catch (eRec) { /* ignore */ }",
+"          return r;",
+"        }, function (err) {",
+"          /* network-level failure: one delayed retry for GET api calls */",
+"          try {",
+"            if (SD && isApiGet && !init.__zpR) {",
+"              return new Promise(function (res2, rej2) {",
+"                setTimeout(function () {",
+"                  var i3 = retryable(init);",
+"                  i3.__zpR = 1;",
+"                  _fetch(iu, i3).then(res2, rej2);",
+"                }, 350);",
+"              });",
+"            }",
+"          } catch (eNet) { /* ignore */ }",
+"          throw err;",
+"        });",
+"        pr.then(function (r) {",
 "          try { ingestSetCookie(r.headers && r.headers.get('x-set-cookie')); } catch (e4) { /* ignore */ }",
-"        }, function () { /* network error \u2014 swallow */ });",
-"        return p;",
+"        }, function () { /* network error: swallow */ });",
+"        return pr;",
 "      } catch (e) {",
 "        return _fetch(input, init);",
 "      }",
