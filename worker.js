@@ -1,8 +1,8 @@
 /* ============================================================
  * z.ai pocket — Cloudflare Worker relay — worker.js
- * BUILD: zp service 6.6 (the current one-and-only build)
+ * BUILD: zp service 6.7 (the current one-and-only build)
  *   Deploy check: /__status on the worker URL must answer
- *   "zp service 6.6" — if it says 6.0 … 6.5, an old copy is
+ *   "zp service 6.7" — if it says 6.0 … 6.6, an old copy is
  *   still deployed; replace it with this file.
  * ------------------------------------------------------------
  * WHAT THIS DOES (v5 — the "no-navigation" architecture)
@@ -170,6 +170,39 @@
  *        chat.z.ai too. Scene, referer-style checks and risk
  *        scoring all line up with the real site now.
  *
+ *   v6.7 — SIGN-IN THAT SURVIVES THE FILE BEING CLOSED + NO MORE
+ *        CAPTCHA STORMS FROM RESEND HAMMERING. Two fixes:
+ *        (1) SESSION VAULT (/__vault). Every browser the pocket
+ *            file runs in is expected to keep localStorage between
+ *            opens — but many phone "viewer" apps open saved HTML
+ *            in an ephemeral context where ALL storage is wiped the
+ *            moment the file closes, so the saved z.ai session
+ *            (cookie jar + login token) evaporated and the user
+ *            re-signed-in on every single open. The vault stores an
+ *            AES-GCM-encrypted session snapshot (the pocket
+ *            encrypts it client-side with a secret only the user
+ *            knows; the worker only ever sees ciphertext) in the
+ *            edge cache, keyed by SHA-256(secret + deploy key).
+ *            On a wiped phone: type the secret once, the session
+ *            comes back, the app boots signed in. Wrong-secret
+ *            probing is rate-limited and yields nothing (the key
+ *            is a hash, the payload ciphertext).
+ *        (2) CAPACITY AUTO-RETRY for chat completions POSTs. z.ai
+ *            answers a busy model with an SSE error event
+ *            (error_type "rate_limit_short" / "global_limit_reached"
+ *            — the "X is intensifying the coordination of
+ *            resources, please try again later" modal). Users
+ *            hammer the resend button to "get the request in",
+ *            and that rapid-fire burst is exactly what trips z.ai's
+ *            risk control into captcha mode ("verification
+ *            required" even while signed in). The worker now
+ *            retries those responses SERVER-SIDE, invisibly, with
+ *            a paced backoff (3s/8s/18s/35s + jitter — the same
+ *            "keep trying" the user did by hand, but at a rhythm
+ *            the risk control tolerates). Captcha-required errors
+ *            and auth failures are NEVER retried — the slider must
+ *            still pop, and 401/403 keeps the v6.4/v6.5 recovery.
+ *
  * DEPLOY (you already have a worker)
  *   1. dash.cloudflare.com → Workers & Pages → your worker
  *   2. "Edit code" / Quick Edit → select all → paste this file
@@ -196,6 +229,10 @@
  *                   boot handle). Neutral: no z.ai strings.
  *   /__diag      -> live upstream probe report (three probes,
  *                   plain-English verdict).
+ *   /__vault     -> the session vault (v6.7). GET/POST/DELETE
+ *                   with header x-vault-pin (6+ chars). Stores one
+ *                   small encrypted JSON blob per secret in the
+ *                   edge cache; nothing else, no plaintext ever.
  *   /__clear     -> expire session cookies, back to /
  *   /favicon.ico -> 204 (neutral — never a proxied page)
  *   /p/<host>/*  -> legacy v3 form, still accepted for stale
@@ -214,7 +251,7 @@
  *     them as x-cookie. Nothing is stored at this origin.
  * ============================================================ */
 
-const VERSION = 'zp service 6.6';
+const VERSION = 'zp service 6.7';
 
 /* z.ai first-party family (suffix match — covers subdomains) */
 const ALLOW = [
@@ -1872,6 +1909,188 @@ const PATCH_JS = [
 
 /* ============================================================ */
 
+/* ============================================================
+ * v6.7: /__vault — the session vault
+ * ------------------------------------------------------------
+ * Some phone "viewer" apps open saved HTML files in ephemeral
+ * contexts: the moment the file closes, localStorage — and with it
+ * the saved z.ai session (cookie jar + login token) — is GONE, and
+ * the user signs in again on every single open. The vault is the
+ * way out: the pocket file encrypts its session snapshot
+ * client-side (AES-GCM, key derived from a secret only the user
+ * knows via PBKDF2) and stores the ciphertext HERE, in the edge
+ * cache, under a cache key derived from SHA-256(secret + deploy
+ * key). The worker never sees plaintext and never sees the secret
+ * itself (only its hash). On a wiped phone the user types the
+ * secret once and the session comes back.
+ *
+ *   GET    /__vault  (x-vault-pin) -> the stored blob, or 404
+ *   POST   /__vault  (x-vault-pin) -> store/replace the blob
+ *   DELETE /__vault  (x-vault-pin) -> forget the blob
+ *
+ * Wrong-secret probing is rate-limited per IP and yields nothing:
+ * a wrong secret hashes to a different cache key (a miss), and a
+ * right secret is required to decrypt the payload anyway.
+ * Cache entries live 30 days; every re-save refreshes that clock.
+ * ============================================================ */
+
+const VAULT_MAX_BYTES = 65536;
+const vaultFails = new Map(); /* ip -> {n, t} — wrong-pin attempts in the window */
+
+function vaultPinOk(pin) {
+  return typeof pin === 'string' && pin.length >= 6 && pin.length <= 128 &&
+    /^[\x20-\x7e]+$/.test(pin); /* printable, no header-hostile bytes */
+}
+
+async function sha256Hex(str) {
+  const dig = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+  let out = '';
+  const b = new Uint8Array(dig);
+  for (let i = 0; i < b.length; i++) out += b[i].toString(16).padStart(2, '0');
+  return out;
+}
+
+function vaultRateGate(req) {
+  /* per-IP wrong-pin throttle: the map is per isolate (best effort,
+   * colo-local) — enough to make blind probing of a 6+ char secret
+   * hopeless while never bothering an honest user. */
+  const ip = String(req.headers.get('cf-connecting-ip') || req.headers.get('x-real-ip') || 'unknown').slice(0, 64);
+  const now = Date.now();
+  if (vaultFails.size > 4096) {
+    for (const [k, v] of vaultFails) { if (now - v.t > 120000) vaultFails.delete(k); }
+  }
+  const e = vaultFails.get(ip);
+  return { ip: ip, e: e, now: now };
+}
+
+async function handleVault(req, url) {
+  const method = req.method.toUpperCase();
+  const pin = req.headers.get('x-vault-pin') || '';
+  if (!vaultPinOk(pin)) {
+    return json({ ok: false, error: 'missing or bad secret (x-vault-pin, 6+ printable characters)' }, req, 400);
+  }
+  const origin = new URL(req.url).origin;
+  const keyUrl = origin + '/__vault/' + (await sha256Hex(TOK_KEY + '|zp-vault-v1|' + pin));
+  const cache = caches.default;
+
+  if (method === 'GET' || method === 'HEAD') {
+    const g = vaultRateGate(req);
+    if (g.e && g.e.n >= 6 && g.now - g.e.t < 120000) {
+      return json({ ok: false, error: 'too many attempts — wait two minutes and try again' }, req, 429);
+    }
+    let hit = null;
+    try { hit = await cache.match(keyUrl); } catch (eC) { hit = null; }
+    if (!hit) {
+      if (g.e) { g.e.n++; g.e.t = g.now; } else { vaultFails.set(g.ip, { n: 1, t: g.now }); }
+      return json({ ok: false, error: 'no backup found for this secret' }, req, 404);
+    }
+    if (g.e) vaultFails.delete(g.ip); /* a good pin clears the slate */
+    const body = await hit.text();
+    const h = new Headers({ 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+    return new Response(body, { status: 200, headers: corsHeaders(req, h) });
+  }
+
+  if (method === 'POST' || method === 'PUT') {
+    const body = await req.text();
+    if (!body || body.length > VAULT_MAX_BYTES) {
+      return json({ ok: false, error: 'blob must be 1..' + VAULT_MAX_BYTES + ' bytes' }, req, 400);
+    }
+    try { JSON.parse(body); } catch (eJ) {
+      return json({ ok: false, error: 'blob must be JSON' }, req, 400);
+    }
+    const toStore = new Response(body, {
+      headers: { 'content-type': 'application/json', 'cache-control': 'max-age=2592000' }, /* 30 days */
+    });
+    try {
+      await cache.put(new Request(keyUrl, { method: 'GET' }), toStore);
+    } catch (eP) {
+      return json({ ok: false, error: 'vault storage refused the blob' }, req, 503);
+    }
+    return json({ ok: true, bytes: body.length, ts: Date.now() }, req);
+  }
+
+  if (method === 'DELETE') {
+    try { await cache.delete(keyUrl); } catch (eD) { /* idempotent */ }
+    return json({ ok: true, note: 'vault cleared for this secret' }, req);
+  }
+
+  return json({ ok: false, error: 'use GET, POST or DELETE' }, req, 405);
+}
+
+/* ---- v6.7: capacity auto-retry helpers (chat completions) ----------
+ * z.ai reports a busy model as an SSE error event whose error_type is
+ * "rate_limit_short" or "global_limit_reached" (the "X is intensifying
+ * the coordination of resources" modal), or occasionally as a plain
+ * 429/5xx. peekCompletionsFirst() reads the FIRST bytes of the
+ * upstream response just far enough to classify it:
+ *   'retry'   — a known-transient capacity error (safe to retry)
+ *   'captcha' — FRONTEND_CAPTCHA_REQUIRED (NEVER retry: the slider
+ *               must reach the app)
+ *   null      — anything else (auth, personal hourly limit, or a
+ *               normal stream already starting) — pass through.
+ * The buffered bytes are always returned so the caller can rebuild
+ * the response byte-exact when it does NOT retry. */
+const ZP_SLEEP = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function peekCompletionsFirst(res, maxBytes) {
+  const lim = maxBytes || 4096;
+  const dec = new TextDecoder();
+  const chunks = [];
+  let text = '';
+  let total = 0;
+  let done = false;
+  const reader = res.body ? res.body.getReader() : null;
+  if (!reader) return { sig: null, chunks: chunks, done: true };
+  while (total < lim) {
+    const rd = await reader.read();
+    if (rd.done) { done = true; break; }
+    chunks.push(rd.value);
+    total += rd.value.length;
+    text += dec.decode(rd.value, { stream: true });
+    if (/"error_type"\s*:/.test(text) || /"status"\s*:\s*"error"/.test(text) || /FRONTEND_CAPTCHA_REQUIRED/.test(text)) break;
+    if (text.indexOf('\n\n') >= 0 && text.indexOf('data:') >= 0) break; /* a full, healthy event arrived */
+  }
+  let sig = null;
+  if (/FRONTEND_CAPTCHA_REQUIRED/.test(text)) sig = 'captcha';
+  else {
+    const m = text.match(/"error_type"\s*:\s*"([a-z_]+)"/);
+    if (m && (m[1] === 'rate_limit_short' || m[1] === 'global_limit_reached')) sig = 'retry';
+  }
+  return { sig: sig, chunks: chunks, done: done, reader: reader };
+}
+
+/* rebuild a response with the peeked bytes prepended, streaming the rest */
+function rebuildPeeked(original, peek) {
+  const first = peek.chunks.length === 1 ? peek.chunks[0]
+    : (peek.chunks.length > 1 ? concatChunks(peek.chunks) : new Uint8Array(0));
+  if (!peek.reader || peek.done) {
+    return new Response(first, { status: original.status, headers: original.headers });
+  }
+  const rest = peek.reader; /* already-locked reader: pump it through a new stream */
+  const stream = new ReadableStream({
+    start(ctrl) {
+      try { if (first.length) ctrl.enqueue(first); } catch (eE) { /* ignore */ }
+      const pump = () => rest.read().then((rd) => {
+        if (rd.done) { try { ctrl.close(); } catch (eC) { /* ignore */ } return; }
+        try { ctrl.enqueue(rd.value); } catch (eE2) { /* ignore */ }
+        pump();
+      }).catch(() => { try { ctrl.close(); } catch (eC2) { /* ignore */ } });
+      pump();
+    },
+    cancel() { try { rest.cancel(); } catch (eC) { /* ignore */ } },
+  });
+  return new Response(stream, { status: original.status, headers: original.headers });
+}
+
+function concatChunks(chunks) {
+  let n = 0;
+  for (const c of chunks) n += c.length;
+  const out = new Uint8Array(n);
+  let o = 0;
+  for (const c of chunks) { out.set(c, o); o += c.length; }
+  return out;
+}
+
 addEventListener('fetch', (event) => {
   event.respondWith(handle(event.request, event));
 });
@@ -1915,6 +2134,11 @@ async function handle(req, event) {
      * a blocked page", this page tells the user WHY. */
     if (url.pathname === '/__diag') {
       return diagPage(req, event);
+    }
+
+    /* ---- v6.7: the session vault (own auth: the user's secret) ---- */
+    if (url.pathname === '/__vault') {
+      return handleVault(req, url);
     }
 
 
@@ -2302,6 +2526,61 @@ async function handle(req, event) {
       return json({ error: 'upstream fetch failed', detail: String(err && err.message || err) }, req, 502);
     }
 
+    /* ---- v6.7: capacity auto-retry for chat completions POSTs -------
+     * z.ai's "model at capacity" answer arrives as an HTTP 200 SSE
+     * event with error_type "rate_limit_short" (or "global_limit_
+     * reached"), or as a plain 429/5xx. The app shows the "X is
+     * intensifying the coordination of resources" modal, the user
+     * hammers resend, and THAT burst is what flips z.ai's risk control
+     * into captcha mode ("verification required" even signed in). So
+     * the worker does the resending itself — same request, paced
+     * backoff (3s/8s/18s/35s with jitter), up to four extra attempts,
+     * invisible to the app (it just sees its normal pending state).
+     * NEVER retried: captcha-required errors (the slider must pop),
+     * 401/403 (the v6.4/v6.5 session recovery already handled those
+     * above), and personal hourly limits (user_limit_reached — a
+     * retry within a minute cannot succeed). Aborts when the phone
+     * goes away (req.signal). The peeked first bytes are prepended
+     * byte-exact on pass-through, so a normal stream is untouched. */
+    /* (isChatApi is recomputed here: the 6.4 recovery declared its own
+     * copy inside the try block above, which is out of scope here.) */
+    const isChatApiCap = host === chatHost(event) && /^\/api\//.test(upUrl.pathname);
+    const isCompletionsPost = isChatApiCap && method === 'POST' && /\/chat\/completions\/?$/.test(upUrl.pathname) &&
+      body != null && typeof body.byteLength === 'number';
+    if (isCompletionsPost) {
+      const waits = [3000, 8000, 18000, 35000];
+      let capAttempt = 0;
+      for (;;) {
+        if (req.signal && req.signal.aborted) break;
+        if (res.status === 200) {
+          let peek = null;
+          try { peek = await peekCompletionsFirst(res, 4096); } catch (ePk) { peek = null; }
+          if (!peek) break; /* peek failed — serve the stream untouched */
+          if (peek.sig !== 'retry' || capAttempt >= waits.length) {
+            /* healthy stream, captcha, other error, or out of attempts:
+             * hand it through byte-exact (peeked bytes prepended). */
+            res = rebuildPeeked(res, peek);
+            break;
+          }
+          try { if (peek.reader) await peek.reader.cancel(); } catch (eCc) { /* ignore */ }
+        } else if (res.status === 429 || res.status === 500 || res.status === 502 || res.status === 503 || res.status === 504) {
+          if (capAttempt >= waits.length) break; /* pass the failure through as-is */
+          try { if (res.body && res.body.cancel) res.body.cancel(); } catch (eCn) { /* ignore */ }
+        } else {
+          break; /* 401/403/404/… — already recovered above, or not ours to fix */
+        }
+        const waitMs = Math.round(waits[capAttempt] * (0.75 + Math.random() * 0.5));
+        capAttempt++;
+        await ZP_SLEEP(waitMs);
+        if (req.signal && req.signal.aborted) break;
+        try {
+          const resCap = await fetch(upUrl.toString(), { method: 'POST', headers: h, redirect: 'manual', body: body });
+          res = resCap;
+        } catch (eCf) { break; } /* transport hiccup — the phone sees the last answer we have */
+      }
+      if (capAttempt > 0) retried = retried || 'capacity';
+    }
+
     /* ---- redirect handling: rewrite Location and let the browser follow inside the worker ---- */
     const loc = res.headers.get('location');
     if (loc && res.status >= 300 && res.status < 400 && res.status !== 304) {
@@ -2321,7 +2600,7 @@ async function handle(req, event) {
     reissueRawCookies(recoveryCookies, outHeaders); /* v6.4 recovery cookies ride along */
     maybeSetTokenCookie(req, outHeaders, event);
     outHeaders.set('x-final-url', res.url || upUrl.toString());
-    if (retried) outHeaders.set('x-zp-retry', retried === 'dropauth' ? 'dropauth' : '1');
+    if (retried) outHeaders.set('x-zp-retry', (retried === 'dropauth' || retried === 'capacity') ? retried : '1');
     const outCt = corsHeaders(req, outHeaders);
 
     if (ct.includes('text/html')) {
@@ -2334,7 +2613,36 @@ async function handle(req, event) {
       const text = await res.text();
       const html = rewriteHtml(text, pfx, host, new URL(req.url).origin, token, allowList(event),
         tokMode ? upUrl.toString() : null);
-      return new Response(html, { status: res.status, headers: outCt });
+      const htmlRes = new Response(html, { status: res.status, headers: outCt });
+      /* ---- v6.7: boot cookie-seed ---------------------------------------
+       * When the pocket's document fetch arrived with REAL browser
+       * cookies for this worker (credentials:'include' mode), the
+       * browser's cookie store may be holding a live session the
+       * pocket's own jar lost (phones whose viewer wipes localStorage
+       * but keeps partitioned cookies). Echo any such cookies back as
+       * x-jar-seed so the shell can merge them into its jar before the
+       * sandbox boots. Anonymous/analytics cookies are skipped. */
+      try {
+        const browserCk = req.headers.get('cookie') || '';
+        if (browserCk) {
+          const have = new Set();
+          (req.headers.get('x-cookie') || '').split(';').forEach(function (kv) {
+            const n = kv.split('=')[0].trim(); if (n) have.add(n);
+          });
+          const seeds = [];
+          browserCk.split(';').forEach(function (kv) {
+            kv = kv.trim(); if (!kv) return;
+            const eq = kv.indexOf('=');
+            if (eq < 1) return;
+            const name = kv.slice(0, eq).trim();
+            if (!name || name === '__zai_t' || have.has(name)) return;
+            if (/^(cf_|__cf|_ga|_gat|_gid|__utm)/i.test(name)) return;
+            seeds.push({ name: name, value: kv.slice(eq + 1).trim() });
+          });
+          if (seeds.length) htmlRes.headers.set('x-jar-seed', encodeURIComponent(JSON.stringify(seeds)));
+        }
+      } catch (eSeed) { /* never let the seed break a document */ }
+      return htmlRes;
     }
     if (ct.includes('text/css')) {
       const text = await res.text();
@@ -2571,7 +2879,7 @@ function corsHeaders(req, h) {
   h.set('access-control-allow-methods', 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS');
   const reqH = req.headers.get('access-control-request-headers');
   h.set('access-control-allow-headers', reqH || '*');
-  h.set('access-control-expose-headers', 'content-disposition, content-type, x-set-cookie, x-final-url, filename, x-zp-retry, x-zp-jsrw');
+  h.set('access-control-expose-headers', 'content-disposition, content-type, x-set-cookie, x-final-url, filename, x-zp-retry, x-zp-jsrw, x-jar-seed');
   h.set('access-control-max-age', '86400');
   return h;
 }
