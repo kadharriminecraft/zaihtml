@@ -1,8 +1,8 @@
 /* ============================================================
  * z.ai pocket — Cloudflare Worker relay — worker.js
- * BUILD: zp service 6.8 (the current one-and-only build)
+ * BUILD: zp service 6.9 (the current one-and-only build)
  *   Deploy check: /__status on the worker URL must answer
- *   "zp service 6.8" — if it says 6.0 … 6.7, an old copy is
+ *   "zp service 6.9" — if it says 6.0 … 6.8, an old copy is
  *   still deployed; replace it with this file.
  * ------------------------------------------------------------
  * WHAT THIS DOES (v5 — the "no-navigation" architecture)
@@ -226,6 +226,26 @@
  *        backup; /__status now reports vault_auto:true so the
  *        pocket only calls the new endpoint on 6.8+.
  *
+ *   v6.9 — THE RELAY KEEPS THE SESSION OPEN (single-user mode).
+ *        User verdict on 6.7/6.8: "I don't care for the backups
+ *        or anything — get rid of all that. Find a new way to
+ *        stay signed in, like having the worker keep the session
+ *        open. I am only using the worker for myself." So both
+ *        vaults are GONE (no secrets, no device keys, no zp_dev
+ *        cookie, no cards in the pocket), replaced by one simple
+ *        thing: the worker passively CAPTURES the live session
+ *        from the traffic it already proxies — every set-cookie
+ *        z.ai hands out, every Bearer token the app sends, and
+ *        the authoritative {token,id,role} of each /api/v1/auths
+ *        answer — into a single edge-cache slot (/__session).
+ *        The pocket fetches it once per open, before the first
+ *        document load, and the app boots already signed in —
+ *        no matter what the phone's viewer does to its storage.
+ *        Guest traffic never demotes a held user session (the
+ *        auths answer names the role); a sign-out empties the
+ *        jar (logout clears the cookies), so a signed-out file
+ *        boots signed out. /__status reports session:true.
+ *
  * DEPLOY (you already have a worker)
  *   1. dash.cloudflare.com → Workers & Pages → your worker
  *   2. "Edit code" / Quick Edit → select all → paste this file
@@ -252,16 +272,12 @@
  *                   boot handle). Neutral: no z.ai strings.
  *   /__diag      -> live upstream probe report (three probes,
  *                   plain-English verdict).
- *   /__vault     -> the session vault (v6.7). GET/POST/DELETE
- *                   with header x-vault-pin (6+ chars). Stores one
- *                   small encrypted JSON blob per secret in the
- *                   edge cache; nothing else, no plaintext ever.
- *   /__vault/auto -> the zero-effort device vault (v6.8).
- *                   GET/POST/DELETE with header x-zp-device (the
- *                   key baked into the pocket file by the copier)
- *                   or the zp_dev cookie this worker set. Snapshot
- *                   AES-GCM-encrypted at rest; auto-restore is
- *                   what makes sign-in stick across closes.
+ *   /__session   -> the relay-held session (v6.9, single user).
+ *                   GET returns {ok,has,savedAt,token,jar} — the
+ *                   newest session captured passively from the
+ *                   proxied traffic; DELETE forgets it (sign out).
+ *                   No secrets, no keys: the user runs this relay
+ *                   for themselves (see SECURITY note below).
  *   /__clear     -> expire session cookies, back to /
  *   /favicon.ico -> 204 (neutral — never a proxied page)
  *   /p/<host>/*  -> legacy v3 form, still accepted for stale
@@ -277,10 +293,16 @@
  *     /__status and /__diag requires the token.
  *   - Upstream set-cookies are relayed to the sandbox runtime via
  *     the CORS-exposed x-set-cookie header; the runtime replays
- *     them as x-cookie. Nothing is stored at this origin.
+ *     them as x-cookie. Nothing is stored at this origin except
+ *     the ONE /__session slot (v6.9): it holds the captured live
+ *     session so the user's own pocket file re-signs itself in.
+ *     This relay is single-user by design — if the worker URL
+ *     ever leaks, DELETE /__session (or just sign out in the
+ *     app) resets it. The zp_dev cookie is still stripped
+ *     upstream (hygiene for 6.8-era leftovers).
  * ============================================================ */
 
-const VERSION = 'zp service 6.8';
+const VERSION = 'zp service 6.9';
 
 /* z.ai first-party family (suffix match — covers subdomains) */
 const ALLOW = [
@@ -1939,37 +1961,35 @@ const PATCH_JS = [
 /* ============================================================ */
 
 /* ============================================================
- * v6.7: /__vault — the session vault
+ * v6.9: /__session — the relay-held session (single user)
  * ------------------------------------------------------------
- * Some phone "viewer" apps open saved HTML files in ephemeral
- * contexts: the moment the file closes, localStorage — and with it
- * the saved z.ai session (cookie jar + login token) — is GONE, and
- * the user signs in again on every single open. The vault is the
- * way out: the pocket file encrypts its session snapshot
- * client-side (AES-GCM, key derived from a secret only the user
- * knows via PBKDF2) and stores the ciphertext HERE, in the edge
- * cache, under a cache key derived from SHA-256(secret + deploy
- * key). The worker never sees plaintext and never sees the secret
- * itself (only its hash). On a wiped phone the user types the
- * secret once and the session comes back.
+ * The user asked for the simplest possible persistence: "have the
+ * worker keep the session open — I am only using the worker for
+ * myself." No secrets, no device keys, no vaults (both are gone).
+ * It works because the relay already sees every byte of the
+ * session: z.ai hands it out as set-cookie headers on responses,
+ * the app sends it as the Bearer token on API requests, and every
+ * /api/v1/auths answer names the authoritative {token, id, role}.
+ * The worker captures all three PASSIVELY (zero client help) into
+ * one edge-cache slot:
  *
- *   GET    /__vault  (x-vault-pin) -> the stored blob, or 404
- *   POST   /__vault  (x-vault-pin) -> store/replace the blob
- *   DELETE /__vault  (x-vault-pin) -> forget the blob
+ *   GET    /__session -> {ok, has, savedAt, token, jar:[{name,value}]}
+ *   DELETE /__session -> forget it (a clean sign-out)
  *
- * Wrong-secret probing is rate-limited per IP and yields nothing:
- * a wrong secret hashes to a different cache key (a miss), and a
- * right secret is required to decrypt the payload anyway.
- * Cache entries live 30 days; every re-save refreshes that clock.
+ * The pocket fetches it once per open, before the first document
+ * load, so the app boots already signed in — on ANY phone, no
+ * matter what its viewer does to localStorage. A GUEST capture
+ * never demotes a held USER session (auths names the role, and a
+ * foreign Bearer's JWT id is compared before it is taken); a
+ * sign-out clears the jar (logout set-cookies are dead-cookie
+ * removals), so a signed-out file boots signed out. Every
+ * operation reads/writes the edge cache directly (no isolate
+ * memory), so every Cloudflare isolate stays coherent. Captures
+ * run via event.waitUntil and can never break the proxy.
  * ============================================================ */
 
-const VAULT_MAX_BYTES = 65536;
-const vaultFails = new Map(); /* ip -> {n, t} — wrong-pin attempts in the window */
-
-function vaultPinOk(pin) {
-  return typeof pin === 'string' && pin.length >= 6 && pin.length <= 128 &&
-    /^[\x20-\x7e]+$/.test(pin); /* printable, no header-hostile bytes */
-}
+const sessionHits = new Map(); /* ip -> {n, t} — /__session ops in the window */
+const SESSION_EMPTY = { jar: {}, token: '', role: '', id: '', ts: 0 };
 
 async function sha256Hex(str) {
   const dig = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
@@ -1979,230 +1999,146 @@ async function sha256Hex(str) {
   return out;
 }
 
-function vaultRateGate(req) {
-  /* per-IP wrong-pin throttle: the map is per isolate (best effort,
-   * colo-local) — enough to make blind probing of a 6+ char secret
-   * hopeless while never bothering an honest user. */
+/* the JWT payload (id/role) — the same decode the auths heal uses */
+function jwtClaims(t) {
+  try {
+    const parts = String(t || '').split('.');
+    if (parts.length !== 3) return null;
+    const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (parts[1].length % 4)) % 4);
+    const dec = JSON.parse(atob(b64));
+    return (dec && typeof dec === 'object') ? dec : null;
+  } catch (e) { return null; }
+}
+
+function sessionRateOk(req) {
+  /* light cap, same shape as the old vaults: 120 ops / 2 min / IP */
   const ip = String(req.headers.get('cf-connecting-ip') || req.headers.get('x-real-ip') || 'unknown').slice(0, 64);
   const now = Date.now();
-  if (vaultFails.size > 4096) {
-    for (const [k, v] of vaultFails) { if (now - v.t > 120000) vaultFails.delete(k); }
+  if (sessionHits.size > 4096) {
+    for (const [k, v] of sessionHits) { if (now - v.t > 120000) sessionHits.delete(k); }
   }
-  const e = vaultFails.get(ip);
-  return { ip: ip, e: e, now: now };
-}
-
-async function handleVault(req, url) {
-  const method = req.method.toUpperCase();
-  const pin = req.headers.get('x-vault-pin') || '';
-  if (!vaultPinOk(pin)) {
-    return json({ ok: false, error: 'missing or bad secret (x-vault-pin, 6+ printable characters)' }, req, 400);
-  }
-  const origin = new URL(req.url).origin;
-  const keyUrl = origin + '/__vault/' + (await sha256Hex(TOK_KEY + '|zp-vault-v1|' + pin));
-  const cache = caches.default;
-
-  if (method === 'GET' || method === 'HEAD') {
-    const g = vaultRateGate(req);
-    if (g.e && g.e.n >= 6 && g.now - g.e.t < 120000) {
-      return json({ ok: false, error: 'too many attempts — wait two minutes and try again' }, req, 429);
-    }
-    let hit = null;
-    try { hit = await cache.match(keyUrl); } catch (eC) { hit = null; }
-    if (!hit) {
-      if (g.e) { g.e.n++; g.e.t = g.now; } else { vaultFails.set(g.ip, { n: 1, t: g.now }); }
-      return json({ ok: false, error: 'no backup found for this secret' }, req, 404);
-    }
-    if (g.e) vaultFails.delete(g.ip); /* a good pin clears the slate */
-    const body = await hit.text();
-    const h = new Headers({ 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-    return new Response(body, { status: 200, headers: corsHeaders(req, h) });
-  }
-
-  if (method === 'POST' || method === 'PUT') {
-    const body = await req.text();
-    if (!body || body.length > VAULT_MAX_BYTES) {
-      return json({ ok: false, error: 'blob must be 1..' + VAULT_MAX_BYTES + ' bytes' }, req, 400);
-    }
-    try { JSON.parse(body); } catch (eJ) {
-      return json({ ok: false, error: 'blob must be JSON' }, req, 400);
-    }
-    const toStore = new Response(body, {
-      headers: { 'content-type': 'application/json', 'cache-control': 'max-age=2592000' }, /* 30 days */
-    });
-    try {
-      await cache.put(new Request(keyUrl, { method: 'GET' }), toStore);
-    } catch (eP) {
-      return json({ ok: false, error: 'vault storage refused the blob' }, req, 503);
-    }
-    return json({ ok: true, bytes: body.length, ts: Date.now() }, req);
-  }
-
-  if (method === 'DELETE') {
-    try { await cache.delete(keyUrl); } catch (eD) { /* idempotent */ }
-    return json({ ok: true, note: 'vault cleared for this secret' }, req);
-  }
-
-  return json({ ok: false, error: 'use GET, POST or DELETE' }, req, 405);
-}
-
-/* ============================================================
- * v6.8: /__vault/auto — the zero-effort device vault
- * ------------------------------------------------------------
- * The 6.7 pin vault needs the user to remember a secret; this one
- * needs NOTHING. The pocket file carries a random DEVICE KEY
- * (stamped into it by the copier at save time — the one thing a
- * wiping viewer never deletes is the file itself; phones that keep
- * storage or cookies converge on a runtime key / the zp_dev
- * cookie). The pocket auto-saves the newest session snapshot here
- * after every change and auto-restores it before the first document
- * load on every open. That is the whole fix for "I have to sign in
- * again every time I open the file".
- *
- *   GET    /__vault/auto (x-zp-device | zp_dev cookie) -> the snapshot
- *   POST   /__vault/auto (x-zp-device | zp_dev cookie) -> store/replace
- *   DELETE /__vault/auto (x-zp-device | zp_dev cookie) -> forget it
- *
- * Identity: the x-zp-device header (16-64 chars [A-Za-z0-9_-])
- * wins; otherwise the zp_dev cookie this worker issued. Every
- * answer re-issues zp_dev=<key> (1 year, SameSite=None, Partitioned)
- * so viewers that keep cookies but wipe storage still find their
- * session, and a GET that arrived cookie-only answers with the
- * device key so the pocket can re-persist it. The snapshot is
- * stored AES-GCM-encrypted at rest under SHA-256(deploy key +
- * device key) — the cache never holds plaintext, and a wrong key is
- * just a cache miss in a 2^128 space. A light per-IP rate cap keeps
- * the endpoint tidy.
- * ============================================================ */
-
-const AUTO_MAX_BYTES = 65536;
-const autoVaultHits = new Map(); /* ip -> {n, t} — every /__vault/auto op in the window */
-
-function deviceKeyOk(dev) {
-  return typeof dev === 'string' && dev.length >= 16 && dev.length <= 64 &&
-    /^[A-Za-z0-9_-]+$/.test(dev);
-}
-
-function deviceKeyOf(req) {
-  const hdr = (req.headers.get('x-zp-device') || '').trim();
-  if (deviceKeyOk(hdr)) return hdr;
-  /* the zp_dev cookie this worker issued (value = the device key) */
-  const ck = req.headers.get('cookie') || '';
-  const m = ck.match(/(?:^|;\s*)zp_dev=([A-Za-z0-9_-]{16,64})(?:;|$)/);
-  if (m) return m[1];
-  return '';
-}
-
-function devCookie(dev) {
-  return 'zp_dev=' + dev + '; Path=/; Max-Age=31536000; Secure; SameSite=None; Partitioned';
-}
-
-/* every answer mirrors the device key into the zp_dev cookie */
-function autoJson(req, obj, status, dev) {
-  const h = new Headers({ 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-  if (dev) h.append('set-cookie', devCookie(dev));
-  return new Response(JSON.stringify(obj), { status: status || 200, headers: corsHeaders(req, h) });
-}
-
-function autoRateOk(req) {
-  /* generous cap: 120 ops / 2 min / IP (an honest pocket does ~1 op
-   * per boot + one debounced save per burst of activity) */
-  const ip = String(req.headers.get('cf-connecting-ip') || req.headers.get('x-real-ip') || 'unknown').slice(0, 64);
-  const now = Date.now();
-  if (autoVaultHits.size > 4096) {
-    for (const [k, v] of autoVaultHits) { if (now - v.t > 120000) autoVaultHits.delete(k); }
-  }
-  const e = autoVaultHits.get(ip);
+  const e = sessionHits.get(ip);
   if (e && now - e.t < 120000) { e.n++; return e.n <= 120; }
-  autoVaultHits.set(ip, { n: 1, t: now });
+  sessionHits.set(ip, { n: 1, t: now });
   return true;
 }
 
-function bytesToHex(b) {
-  let s = '';
-  for (let i = 0; i < b.length; i++) s += b[i].toString(16).padStart(2, '0');
-  return s;
-}
-function hexToBytes(h) {
-  const o = new Uint8Array(h.length / 2);
-  for (let i = 0; i < o.length; i++) o[i] = parseInt(h.substr(i * 2, 2), 16);
-  return o;
+async function sessionKeyUrl(req) {
+  const origin = new URL(req.url).origin;
+  return origin + '/__session/' + (await sha256Hex(TOK_KEY + '|zp-session-v1'));
 }
 
-async function autoVaultAesKey(dev) {
-  const dig = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(TOK_KEY + '|zp-auto-key|' + dev));
-  return crypto.subtle.importKey('raw', dig, 'AES-GCM', false, ['encrypt', 'decrypt']);
+async function sessionRead(req) {
+  try {
+    const hit = await caches.default.match(await sessionKeyUrl(req));
+    if (hit) {
+      const j = JSON.parse(await hit.text());
+      if (j && typeof j === 'object') {
+        return {
+          jar: (j.jar && typeof j.jar === 'object' && !Array.isArray(j.jar)) ? j.jar : {},
+          token: typeof j.token === 'string' ? j.token : '',
+          role: typeof j.role === 'string' ? j.role : '',
+          id: typeof j.id === 'string' ? j.id : '',
+          ts: j.ts || 0,
+        };
+      }
+    }
+  } catch (eR) { /* cache hiccup: act empty */ }
+  return { jar: {}, token: '', role: '', id: '', ts: 0 };
 }
 
-async function handleVaultAuto(req, url) {
+async function sessionWrite(req, st) {
+  try {
+    const body = JSON.stringify({ jar: st.jar, token: st.token, role: st.role, id: st.id, ts: st.ts });
+    const toStore = new Response(body, {
+      headers: { 'content-type': 'application/json', 'cache-control': 'max-age=2592000' }, /* 30 days */
+    });
+    await caches.default.put(new Request(await sessionKeyUrl(req), { method: 'GET' }), toStore);
+  } catch (eP) { /* cache refused — nothing we can do; the next capture retries */ }
+}
+
+/* set-cookie array -> jar merge: an empty value or a past expiry REMOVES */
+function sessionEatSetCookies(st, list) {
+  let changed = false;
+  (list || []).forEach((raw) => {
+    try {
+      const bits = String(raw).split(';');
+      const nv = bits[0];
+      const eq = nv.indexOf('=');
+      if (eq < 1) return;
+      const name = nv.slice(0, eq).trim();
+      if (!name) return;
+      const value = nv.slice(eq + 1).trim();
+      let dead = value === '';
+      for (let i = 1; i < bits.length; i++) {
+        const b = bits[i].trim().toLowerCase();
+        if (b === 'max-age=0' || b === 'max-age=-1' || b === 'expires=thu, 01 jan 1970 00:00:00 gmt') dead = true;
+        const mEx = b.match(/^expires=(.+)$/);
+        if (mEx) { const t = Date.parse(mEx[1]); if (!isNaN(t) && t <= Date.now()) dead = true; }
+      }
+      if (dead) { if (name in st.jar) { delete st.jar[name]; changed = true; } }
+      else if (st.jar[name] !== value) { st.jar[name] = value; changed = true; }
+    } catch (eC) { /* ignore a malformed cookie */ }
+  });
+  return changed;
+}
+
+/* passive capture — the proxy path calls this (waitUntil) for every
+ * chat-host response. authsObj = a parsed {token,id,role} auths
+ * answer when this response IS one; bearer = the request's Bearer. */
+async function sessionCapture(req, bearer, setCookieList, authsObj) {
+  try {
+    const st = await sessionRead(req);
+    const heldUser = !!(st.role && st.role !== 'guest' && st.id);
+    let changed = sessionEatSetCookies(st, setCookieList);
+    /* (1) the auths answer is authoritative: a USER session always
+     * wins; a GUEST answer never demotes a held user session. */
+    if (authsObj && authsObj.token && authsObj.id) {
+      const role = String(authsObj.role || '');
+      const id = String(authsObj.id);
+      if (role !== 'guest') {
+        if (st.token !== authsObj.token) { st.token = String(authsObj.token); changed = true; }
+        if (st.id !== id) { st.id = id; changed = true; }
+        if (role && st.role !== role) { st.role = role; changed = true; }
+      } else if (!heldUser) {
+        /* guest over guest (or over nothing): keep it fresh */
+        if (st.token !== authsObj.token) { st.token = String(authsObj.token); changed = true; }
+        if (st.id !== id) { st.id = id; changed = true; }
+        if (st.role !== 'guest') { st.role = 'guest'; changed = true; }
+      }
+    }
+    /* (2) a Bearer on any request keeps the token fresh when it is
+     * the SAME identity (z.ai rotates tokens on every auths call);
+     * a foreign id only lands when nothing better is held. */
+    if (bearer && jwtClaims(bearer)) {
+      const id = String((jwtClaims(bearer) || {}).id || '');
+      if (!heldUser || st.id === id || !st.token) {
+        if (st.token !== bearer) { st.token = bearer; changed = true; }
+        if (id && st.id !== id) { st.id = id; changed = true; }
+      }
+    }
+    if (changed) { st.ts = Date.now(); await sessionWrite(req, st); }
+  } catch (eS) { /* capture must never break the proxy */ }
+}
+
+/* the endpoint: GET / DELETE (POST is intentionally absent — the
+ * capture path is the only writer; the pocket never uploads) */
+async function handleSession(req, url) {
   const method = req.method.toUpperCase();
-  const dev = deviceKeyOf(req);
-  if (!dev) {
-    return json({ ok: false, error: 'missing device identity (x-zp-device header, 16-64 chars)' }, req, 400);
-  }
-  if (!autoRateOk(req)) {
+  if (!sessionRateOk(req)) {
     return json({ ok: false, error: 'too many requests — wait two minutes and try again' }, req, 429);
   }
-  const origin = new URL(req.url).origin;
-  const keyUrl = origin + '/__vault/auto/' + (await sha256Hex(TOK_KEY + '|zp-auto-v1|' + dev));
-  const cache = caches.default;
-
   if (method === 'GET' || method === 'HEAD') {
-    let hit = null;
-    try { hit = await cache.match(keyUrl); } catch (eC) { hit = null; }
-    let payload = null;
-    if (hit) {
-      try {
-        const box = JSON.parse(await hit.text());
-        const key = await autoVaultAesKey(dev);
-        const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: hexToBytes(box.iv) }, key, hexToBytes(box.ct));
-        payload = JSON.parse(new TextDecoder().decode(pt));
-      } catch (eD) { payload = null; /* wrong-era box or corruption: treat as empty */ }
-    }
-    if (!payload || typeof payload !== 'object') {
-      return autoJson(req, { ok: false, error: 'no auto backup for this device yet', device: dev }, 404, dev);
-    }
-    const hasLogin = !!(payload.ls && payload.ls.token);
-    return autoJson(req, { ok: true, device: dev, savedAt: payload.ts || 0, hasLogin: hasLogin, blob: payload }, 200, dev);
+    const st = await sessionRead(req);
+    const jar = Object.keys(st.jar).map((name) => ({ name: name, value: st.jar[name] }));
+    const has = !!(st.token || jar.length);
+    return json({ ok: true, has: has, savedAt: st.ts || 0, token: st.token || '', jar: jar }, req);
   }
-
-  if (method === 'POST' || method === 'PUT') {
-    const body = await req.text();
-    if (!body || body.length > AUTO_MAX_BYTES) {
-      return json({ ok: false, error: 'snapshot must be 1..' + AUTO_MAX_BYTES + ' bytes' }, req, 400);
-    }
-    let snap = null;
-    try { snap = JSON.parse(body); } catch (eJ) { snap = null; }
-    if (!snap || typeof snap !== 'object' || Array.isArray(snap)) {
-      return json({ ok: false, error: 'snapshot must be a JSON object' }, req, 400);
-    }
-    /* normalize the shape so junk never enters the vault */
-    const clean = {
-      ls: (snap.ls && typeof snap.ls === 'object' && !Array.isArray(snap.ls)) ? snap.ls : {},
-      jar: Array.isArray(snap.jar) ? snap.jar : [],
-      ts: Date.now()
-    };
-    try {
-      const key = await autoVaultAesKey(dev);
-      const iv = crypto.getRandomValues(new Uint8Array(12));
-      const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, key, new TextEncoder().encode(JSON.stringify(clean)));
-      const box = JSON.stringify({ v: 1, enc: 'aes-gcm', iv: bytesToHex(iv), ct: bytesToHex(new Uint8Array(ct)) });
-      const toStore = new Response(box, {
-        headers: { 'content-type': 'application/json', 'cache-control': 'max-age=2592000' }, /* 30 days */
-      });
-      await cache.put(new Request(keyUrl, { method: 'GET' }), toStore);
-    } catch (eP) {
-      return json({ ok: false, error: 'vault storage refused the snapshot' }, req, 503);
-    }
-    return autoJson(req, { ok: true, bytes: body.length, ts: clean.ts }, 200, dev);
-  }
-
   if (method === 'DELETE') {
-    try { await cache.delete(keyUrl); } catch (eD) { /* idempotent */ }
-    return autoJson(req, { ok: true, note: 'auto backup cleared for this device' }, 200, dev);
+    try { await caches.default.delete(await sessionKeyUrl(req)); } catch (eD) { /* idempotent */ }
+    return json({ ok: true, note: 'session forgotten' }, req);
   }
-
-  return json({ ok: false, error: 'use GET, POST or DELETE' }, req, 405);
+  return json({ ok: false, error: 'use GET or DELETE' }, req, 405);
 }
 
 /* ---- v6.7: capacity auto-retry helpers (chat completions) ----------
@@ -2307,7 +2243,7 @@ async function handle(req, event) {
        * the token key or the upstream host. Neutral JSON: no z.ai
        * strings anywhere in this body. */
       const entry = tokPath(chatUpstream(event) + '/');
-      return json({ ok: true, name: VERSION, time: new Date().toISOString(), token_required: !!token, token_ok: tokenOk, vault_auto: true, entry: entry }, req);
+      return json({ ok: true, name: VERSION, time: new Date().toISOString(), token_required: !!token, token_ok: tokenOk, session: true, entry: entry }, req);
     }
 
     /* ---- neutral favicon: never a proxied page ---- */
@@ -2324,13 +2260,9 @@ async function handle(req, event) {
       return diagPage(req, event);
     }
 
-    /* ---- v6.7: the session vault (own auth: the user's secret) ----
-     * ---- v6.8: the device vault (own auth: the file's baked key) -- */
-    if (url.pathname === '/__vault/auto') {
-      return handleVaultAuto(req, url);
-    }
-    if (url.pathname === '/__vault') {
-      return handleVault(req, url);
+    /* ---- v6.9: the relay-held session (single user, no secrets) ---- */
+    if (url.pathname === '/__session') {
+      return handleSession(req, url);
     }
 
 
@@ -2773,6 +2705,35 @@ async function handle(req, event) {
       if (capAttempt > 0) retried = retried || 'capacity';
     }
 
+    /* ---- v6.9: passive session capture (the relay keeps the sign-in).
+     * Reads only headers (set-cookie) + the request's Bearer, plus a
+     * small JSON clone when this response IS an auths answer — the
+     * original response body is never consumed. Runs via waitUntil so
+     * the proxy answer is never delayed by the cache write. */
+    try {
+      if (host === chatHost(event)) {
+        const scAll = (typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : []).concat(recoveryCookies || []);
+        let authsObj = null;
+        if (res.status === 200 && method === 'GET' && /^\/api\/v1\/auths\/?$/.test(upUrl.pathname) &&
+            (res.headers.get('content-type') || '').toLowerCase().includes('json')) {
+          try {
+            const probe = res.clone();
+            const aj = JSON.parse(await probe.text());
+            if (aj && aj.token && aj.id) authsObj = { token: aj.token, id: aj.id, role: aj.role || '' };
+          } catch (ePr) { authsObj = null; }
+        }
+        let bearer = '';
+        const authzCap = req.headers.get('authorization') || '';
+        const mB = authzCap.match(/^\s*Bearer\s+(\S+)\s*$/i);
+        if (mB && mB[1].split('.').length === 3) bearer = mB[1];
+        if (scAll.length || bearer || authsObj) {
+          const pCap = sessionCapture(req, bearer, scAll, authsObj);
+          if (event && typeof event.waitUntil === 'function') { try { event.waitUntil(pCap); } catch (eWu) { pCap.catch(function () { }); } }
+          else pCap.catch(function () { });
+        }
+      }
+    } catch (eSC) { /* capture must never break the proxy */ }
+
     /* ---- redirect handling: rewrite Location and let the browser follow inside the worker ---- */
     const loc = res.headers.get('location');
     if (loc && res.status >= 300 && res.status < 400 && res.status !== 304) {
@@ -2929,9 +2890,10 @@ function maybeSetTokenCookie(req, h, event) {
 
 function mergeCookies(a, b) {
   const seen = new Map();
-  /* v6.8: this worker's OWN cookies never belong upstream — zp_dev
-   * is the device-vault identity, __zai_t the token cookie; both
-   * live on the relay origin only and must not ride to z.ai. */
+  /* this worker's OWN cookies never belong upstream — __zai_t is
+   * the token cookie and zp_dev a 6.8-era device-vault leftover
+   * some phones may still hold; both live on the relay origin
+   * only and must not ride to z.ai. */
   const own = new Set(['zp_dev', '__zai_t']);
   const add = (str) => {
     if (!str) return;
