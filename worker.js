@@ -1,8 +1,8 @@
 /* ============================================================
  * z.ai pocket — Cloudflare Worker relay — worker.js
- * BUILD: zp service 6.9 (the current one-and-only build)
+ * BUILD: zp service 7.0 (the current one-and-only build)
  *   Deploy check: /__status on the worker URL must answer
- *   "zp service 6.9" — if it says 6.0 … 6.8, an old copy is
+ *   "zp service 7.0" — if it says 6.0 … 6.9, an old copy is
  *   still deployed; replace it with this file.
  * ------------------------------------------------------------
  * WHAT THIS DOES (v5 — the "no-navigation" architecture)
@@ -246,6 +246,33 @@
  *        jar (logout clears the cookies), so a signed-out file
  *        boots signed out. /__status reports session:true.
  *
+ *   v7.0 — THE STICKY SESSION (the relay IS the sign-in). 6.9
+ *        captured the session but could still lose it: when the
+ *        app's boot auths check fails with a stale token the SPA
+ *        clears its storage, and the pocket (6.9) treated that as
+ *        a sign-out and DELETED /__session — the relay forgot the
+ *        one good copy (user: "shows me logged in, it reloads, and
+ *        I'm signed out again"). Two fixes, worker-side only:
+ *        (1) STICKY INJECTION — a GET /api/v1/auths/ that answers
+ *        GUEST (stale Bearer, wiped phone, brand-new page — any
+ *        reason) is re-asked with the relay-held session's Bearer
+ *        + jar, and the USER answer is what the app receives. Any
+ *        page, any state, zero client help: it boots into the
+ *        worker's session. The 6.4 401/403 recovery gets the same
+ *        assist (the held token + jar are the retry's best
+ *        material). (2) NOTHING FORGETS THE SESSION ANYMORE except
+ *        an EXPLICIT sign-out: the app's own GET
+ *        /api/v1/auths/signout call (verified in the app bundle)
+ *        or a manual DELETE /__session (which now ALSO fires the
+ *        upstream signout so the token really dies). Boot
+ *        flailing, guest sessions, new pages — all inert. Bonus:
+ *        signin/signup answers are captured the moment they pass
+ *        through (role+email land in the slot), /__session GET
+ *          exposes role/id/email/name for the pocket's status line,
+ *        and a GET /__session for a slot idle > 6h fires a
+ *          background auths keep-alive (the session never idles
+ *          out from merely OPENING the file).
+ *
  * DEPLOY (you already have a worker)
  *   1. dash.cloudflare.com → Workers & Pages → your worker
  *   2. "Edit code" / Quick Edit → select all → paste this file
@@ -272,12 +299,16 @@
  *                   boot handle). Neutral: no z.ai strings.
  *   /__diag      -> live upstream probe report (three probes,
  *                   plain-English verdict).
- *   /__session   -> the relay-held session (v6.9, single user).
- *                   GET returns {ok,has,savedAt,token,jar} — the
- *                   newest session captured passively from the
- *                   proxied traffic; DELETE forgets it (sign out).
- *                   No secrets, no keys: the user runs this relay
- *                   for themselves (see SECURITY note below).
+ *   /__session   -> the relay-held session (v6.9, single user;
+ *                   v7.0: role/id/email/name + keep-alive).
+ *                   GET returns {ok,has,savedAt,token,role,id,
+ *                   email,name,jar} — the newest session captured
+ *                   passively from the proxied traffic, refreshed
+ *                   in the background when idle > 6h. DELETE
+ *                   forgets it AND fires the upstream signout
+ *                   (a real sign-out). No secrets, no keys: the
+ *                   user runs this relay for themselves (see
+ *                   SECURITY note below).
  *   /__clear     -> expire session cookies, back to /
  *   /favicon.ico -> 204 (neutral — never a proxied page)
  *   /p/<host>/*  -> legacy v3 form, still accepted for stale
@@ -298,11 +329,13 @@
  *     session so the user's own pocket file re-signs itself in.
  *     This relay is single-user by design — if the worker URL
  *     ever leaks, DELETE /__session (or just sign out in the
- *     app) resets it. The zp_dev cookie is still stripped
+ *     app) resets it; v7.0 also pins every auths check to the
+ *     held session, so a leaked URL rides YOUR sign-in — reset
+ *     by signing out once. The zp_dev cookie is still stripped
  *     upstream (hygiene for 6.8-era leftovers).
  * ============================================================ */
 
-const VERSION = 'zp service 6.9';
+const VERSION = 'zp service 7.0';
 
 /* z.ai first-party family (suffix match — covers subdomains) */
 const ALLOW = [
@@ -1989,7 +2022,7 @@ const PATCH_JS = [
  * ============================================================ */
 
 const sessionHits = new Map(); /* ip -> {n, t} — /__session ops in the window */
-const SESSION_EMPTY = { jar: {}, token: '', role: '', id: '', ts: 0 };
+const SESSION_EMPTY = { jar: {}, token: '', role: '', id: '', em: '', nm: '', ts: 0 };
 
 async function sha256Hex(str) {
   const dig = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
@@ -2039,17 +2072,19 @@ async function sessionRead(req) {
           token: typeof j.token === 'string' ? j.token : '',
           role: typeof j.role === 'string' ? j.role : '',
           id: typeof j.id === 'string' ? j.id : '',
+          em: typeof j.em === 'string' ? j.em : '',
+          nm: typeof j.nm === 'string' ? j.nm : '',
           ts: j.ts || 0,
         };
       }
     }
   } catch (eR) { /* cache hiccup: act empty */ }
-  return { jar: {}, token: '', role: '', id: '', ts: 0 };
+  return { jar: {}, token: '', role: '', id: '', em: '', nm: '', ts: 0 };
 }
 
 async function sessionWrite(req, st) {
   try {
-    const body = JSON.stringify({ jar: st.jar, token: st.token, role: st.role, id: st.id, ts: st.ts });
+    const body = JSON.stringify({ jar: st.jar, token: st.token, role: st.role, id: st.id, em: st.em || '', nm: st.nm || '', ts: st.ts });
     const toStore = new Response(body, {
       headers: { 'content-type': 'application/json', 'cache-control': 'max-age=2592000' }, /* 30 days */
     });
@@ -2100,6 +2135,11 @@ async function sessionCapture(req, bearer, setCookieList, authsObj) {
         if (st.token !== authsObj.token) { st.token = String(authsObj.token); changed = true; }
         if (st.id !== id) { st.id = id; changed = true; }
         if (role && st.role !== role) { st.role = role; changed = true; }
+        /* v7.0: remember who is signed in (for the pocket's status line) */
+        const em = String(authsObj.em || '');
+        const nm = String(authsObj.nm || '');
+        if (em && st.em !== em) { st.em = em; changed = true; }
+        if (nm && st.nm !== nm) { st.nm = nm; changed = true; }
       } else if (!heldUser) {
         /* guest over guest (or over nothing): keep it fresh */
         if (st.token !== authsObj.token) { st.token = String(authsObj.token); changed = true; }
@@ -2109,8 +2149,15 @@ async function sessionCapture(req, bearer, setCookieList, authsObj) {
     }
     /* (2) a Bearer on any request keeps the token fresh when it is
      * the SAME identity (z.ai rotates tokens on every auths call);
-     * a foreign id only lands when nothing better is held. */
-    if (bearer && jwtClaims(bearer)) {
+     * a foreign id only lands when nothing better is held.
+     * v7.0: NEVER over an auths answer from this same response — the
+     * answer is strictly newer than the request's Bearer (it is the
+     * rotation OF it), so letting the Bearer win would park a stale
+     * token in the slot. Also never when a guest answer bounced off
+     * a held user session — the Bearer that elicited a guest answer
+     * is stale by definition. */
+    const authsUserWon = !!(authsObj && authsObj.token && authsObj.id && String(authsObj.role || '') !== 'guest');
+    if (!authsUserWon && !(authsObj && heldUser) && bearer && jwtClaims(bearer)) {
       const id = String((jwtClaims(bearer) || {}).id || '');
       if (!heldUser || st.id === id || !st.token) {
         if (st.token !== bearer) { st.token = bearer; changed = true; }
@@ -2123,22 +2170,94 @@ async function sessionCapture(req, bearer, setCookieList, authsObj) {
 
 /* the endpoint: GET / DELETE (POST is intentionally absent — the
  * capture path is the only writer; the pocket never uploads) */
-async function handleSession(req, url) {
+async function handleSession(req, url, event) {
   const method = req.method.toUpperCase();
   if (!sessionRateOk(req)) {
     return json({ ok: false, error: 'too many requests — wait two minutes and try again' }, req, 429);
   }
   if (method === 'GET' || method === 'HEAD') {
     const st = await sessionRead(req);
+    /* v7.0 keep-alive: the pocket pulls this on every open of the
+     * file. If the held session has been idle past the threshold
+     * (default 6h; override with SESSION_KEEPALIVE_MS), refresh it
+     * in the background (z.ai never sees the session go stale — the
+     * answer's rotated token lands back in the slot via capture). */
+    const kaMs = parseInt(String((envOf(event) || {}).SESSION_KEEPALIVE_MS || ''), 10) || 6 * 3600 * 1000;
+    if (st.token && st.role && st.role !== 'guest' && (Date.now() - (st.ts || 0) > kaMs)) {
+      const pKA = sessionKeepAlive(req, event);
+      if (event && typeof event.waitUntil === 'function') { try { event.waitUntil(pKA); } catch (eWK) { pKA.catch(function () { }); } }
+      else pKA.catch(function () { });
+    }
     const jar = Object.keys(st.jar).map((name) => ({ name: name, value: st.jar[name] }));
     const has = !!(st.token || jar.length);
-    return json({ ok: true, has: has, savedAt: st.ts || 0, token: st.token || '', jar: jar }, req);
+    return json({
+      ok: true, has: has, savedAt: st.ts || 0, token: st.token || '',
+      role: st.role || '', id: st.id || '', email: st.em || '', name: st.nm || '',
+      jar: jar,
+    }, req);
   }
   if (method === 'DELETE') {
+    /* v7.0: a real sign-out — kill the session UPSTREAM too, so the
+     * forgotten token is actually dead (not just forgotten here). */
+    const st = await sessionRead(req);
+    if (st.token && st.role && st.role !== 'guest') {
+      const pOut = sessionUpstreamSignout(event, st);
+      if (event && typeof event.waitUntil === 'function') { try { event.waitUntil(pOut); } catch (eWO) { pOut.catch(function () { }); } }
+      else pOut.catch(function () { });
+    }
     try { await caches.default.delete(await sessionKeyUrl(req)); } catch (eD) { /* idempotent */ }
     return json({ ok: true, note: 'session forgotten' }, req);
   }
   return json({ ok: false, error: 'use GET or DELETE' }, req, 405);
+}
+
+/* v7.0: background session refresher — one auths GET with the held
+ * Bearer + jar. The rotated answer lands back in the slot through
+ * sessionCapture, so the session slides forward without the app. */
+async function sessionKeepAlive(req, event) {
+  try {
+    const st = await sessionRead(req);
+    if (!st.token || !st.role || st.role === 'guest') return;
+    const h = new Headers({
+      'accept': 'application/json',
+      'accept-encoding': 'gzip, deflate, br',
+      'user-agent': 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
+      'authorization': 'Bearer ' + st.token,
+      'origin': 'https://' + chatHost(event),
+      'referer': 'https://' + chatHost(event) + '/',
+    });
+    const jarStr = Object.keys(st.jar || {}).map((n) => n + '=' + st.jar[n]).join('; ');
+    if (jarStr) h.set('cookie', jarStr);
+    const up = new URL('/api/v1/auths/', chatUpstream(event));
+    const r = await fetch(up.toString(), { method: 'GET', headers: h, redirect: 'manual' });
+    const sc = typeof r.headers.getSetCookie === 'function' ? r.headers.getSetCookie() : [];
+    let ao = null;
+    try {
+      const j = JSON.parse(await r.text());
+      if (j && j.token && j.id) ao = { token: j.token, id: j.id, role: j.role || '', em: j.email || '', nm: j.name || '' };
+    } catch (eKA) { ao = null; }
+    await sessionCapture(req, '', sc, ao);
+  } catch (eKA2) { /* keep-alive is best effort */ }
+}
+
+/* v7.0: fire the app's own signout call upstream with the held
+ * session, so a forgotten session is a DEAD session. */
+async function sessionUpstreamSignout(event, st) {
+  try {
+    const h = new Headers({
+      'accept': 'application/json',
+      'accept-encoding': 'gzip, deflate, br',
+      'user-agent': 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
+      'authorization': 'Bearer ' + st.token,
+      'origin': 'https://' + chatHost(event),
+      'referer': 'https://' + chatHost(event) + '/',
+    });
+    const jarStr = Object.keys(st.jar || {}).map((n) => n + '=' + st.jar[n]).join('; ');
+    if (jarStr) h.set('cookie', jarStr);
+    const up = new URL('/api/v1/auths/signout', chatUpstream(event));
+    const r = await fetch(up.toString(), { method: 'GET', headers: h, redirect: 'manual' });
+    try { if (r.body && r.body.cancel) r.body.cancel(); } catch (eC) { /* ignore */ }
+  } catch (eSO) { /* best effort — the slot is deleted either way */ }
 }
 
 /* ---- v6.7: capacity auto-retry helpers (chat completions) ----------
@@ -2262,7 +2381,7 @@ async function handle(req, event) {
 
     /* ---- v6.9: the relay-held session (single user, no secrets) ---- */
     if (url.pathname === '/__session') {
-      return handleSession(req, url);
+      return handleSession(req, url, event);
     }
 
 
@@ -2467,6 +2586,23 @@ async function handle(req, event) {
     let res;
     let retried = false;
     let recoveryCookies = []; /* v6.4: fresh set-cookies gathered below */
+    /* ---- v7.0: an explicit in-app sign-out forgets the relay-held
+     * session (GET /api/v1/auths/signout — verified in the app's own
+     * bundle). NOTHING else may ever drop it: boot flailing, guest
+     * sessions, new pages and wiped phones must all stay inert
+     * ("I don't want any chance of me getting logged out from a new
+     * page"). The request itself still goes through untouched, so
+     * z.ai kills its side of the session too. */
+    const isSignoutCall = host === chatHost(event) && /^\/api\/v1\/auths\/signout\/?$/.test(upUrl.pathname);
+    if (isSignoutCall) {
+      try {
+        const pForget = (async function () {
+          try { await caches.default.delete(await sessionKeyUrl(req)); } catch (eFd) { /* idempotent */ }
+        })();
+        if (event && typeof event.waitUntil === 'function') { try { event.waitUntil(pForget); } catch (eWf) { pForget.catch(function () { }); } }
+        else pForget.catch(function () { });
+      } catch (eFo) { /* best effort */ }
+    }
     try {
       const fetchInit = { method: method, headers: h, redirect: 'manual' };
       if (body !== undefined) fetchInit.body = body;
@@ -2505,17 +2641,22 @@ async function handle(req, event) {
        * ROTATES the token on every auths call (verified live), so a fresh
        * token alone is normal. Decode the presented Bearer's JWT id and
        * compare with the response's id — a CHANGED id is real degradation.
-       * Then retry WITHOUT the Authorization: the cookies are the truth.
-       * Heal when the retry is better: a non-guest role (the account), or a
-       * DIFFERENT id (the cookie session's continuity restored). */
+       * v7.0 STICKY: this heal now also covers requests with NO Bearer at
+       * all (a wiped/cold page — bearerId stays '??') and, when the relay
+       * HOLDS a user session, re-asks with the HELD Bearer + jar FIRST.
+       * The held session is the freshest thing that exists (every auths
+       * answer through this relay lands in the slot), so the app receives
+       * the USER answer and boots/continues signed in — from ANY page,
+       * with ANY local storage state, zero client help. The old
+       * cookie-continuity retry stays as the fallback. */
       const authzHdr = req.headers.get('authorization');
-      if (isChatApi && method === 'GET' && /^\/api\/v1\/auths\/?$/.test(upUrl.pathname) && authzHdr &&
+      if (isChatApi && method === 'GET' && /^\/api\/v1\/auths\/?$/.test(upUrl.pathname) &&
           res.status === 200 && (res.headers.get('content-type') || '').toLowerCase().includes('json')) {
         try {
           const resProbe = res.clone();
           const dgTxt = await resProbe.text();
           let dg = null; try { dg = JSON.parse(dgTxt); } catch (eDgP) { dg = null; }
-          const bearerVal = String(authzHdr).replace(/^\s*Bearer\s+/i, '');
+          const bearerVal = String(authzHdr || '').replace(/^\s*Bearer\s+/i, '');
           let bearerId = '??';
           try {
             const pl = String(bearerVal).split('.')[1];
@@ -2526,32 +2667,68 @@ async function handle(req, event) {
             }
           } catch (eId) { bearerId = '??'; }
           if (dg && dg.role === 'guest' && dg.token && dg.id && dg.id !== bearerId) {
+            /* ---- v7.0 STICKY: re-ask with the relay-held session first ---- */
+            let stickyOk = false;
+            try {
+              const heldSt = await sessionRead(req);
+              const heldUser = !!(heldSt && heldSt.token && heldSt.role && heldSt.role !== 'guest');
+              if (heldUser) {
+                const hSt = minimalHeaders(req, host);
+                hSt.set('accept', 'application/json');
+                hSt.set('authorization', 'Bearer ' + heldSt.token);
+                let heldJar = '';
+                try {
+                  heldJar = Object.keys(heldSt.jar || {}).map((n) => n + '=' + heldSt.jar[n]).join('; ');
+                } catch (eJH) { heldJar = ''; }
+                const ckSt = mergeCookieList(
+                  [mergeCookies(req.headers.get('cookie') || '', req.headers.get('x-cookie') || ''), heldJar], []);
+                if (ckSt) hSt.set('cookie', ckSt);
+                const rSt = await fetch(upUrl.toString(), { method: 'GET', headers: hSt, redirect: 'manual' });
+                const scSt = typeof rSt.headers.getSetCookie === 'function' ? rSt.headers.getSetCookie() : [];
+                let st2 = null; try { st2 = JSON.parse(await rSt.text()); } catch (eStP) { st2 = null; }
+                if (st2 && st2.token && st2.role !== 'guest') {
+                  /* served as the app's answer — the app stores the fresh
+                   * rotated token and continues signed in; the capture
+                   * below re-clones THIS response and refreshes the slot */
+                  recoveryCookies = scSt;
+                  res = new Response(JSON.stringify(st2), { status: rSt.status, headers: rSt.headers });
+                  retried = 'sticky';
+                  stickyOk = true;
+                } else {
+                  try { if (rSt.body && rSt.body.cancel) rSt.body.cancel(); } catch (eCSt) { /* ignore */ }
+                }
+              }
+            } catch (eSticky) { stickyOk = false; }
+            if (!stickyOk) {
             /* CRITICAL: the retry must carry the ORIGINAL request cookies —
              * NOT merged with the degraded response's set-cookies (those are
              * the freshly-minted stranger's; merging them would make the
              * retry return the stranger again and the heal could never
              * fire). Escape the stranger, ask the cookies what they say. */
             const ckDg = mergeCookies(req.headers.get('cookie') || '', req.headers.get('x-cookie') || '');
-            const hDg = minimalHeaders(req, host);
-            hDg.delete('authorization');
-            hDg.set('accept', 'application/json');
-            if (ckDg) hDg.set('cookie', ckDg);
-            const rDg = await fetch(upUrl.toString(), { method: 'GET', headers: hDg, redirect: 'manual' });
-            const scDg2 = typeof rDg.headers.getSetCookie === 'function' ? rDg.headers.getSetCookie() : [];
-            let dg2 = null;
-            try { dg2 = JSON.parse(await rDg.text()); } catch (eDgP2) { dg2 = null; }
-            /* heal when the retry beats the degraded answer: a real account
-             * (role != guest) or a different session id (cookie continuity
-             * restored). Tokens rotate, so only id/role can be compared. */
-            if (dg2 && dg2.token && (dg2.role !== 'guest' || dg2.id !== dg.id)) {
-              /* healed — serve the cookie-backed session; only the HEALED
-               * session's cookies ride along (the stranger's must not). */
-              recoveryCookies = scDg2;
-              res = new Response(JSON.stringify(dg2), { status: rDg.status, headers: rDg.headers });
-              retried = 'dropauth';
+            if (ckDg || authzHdr) {
+              const hDg = minimalHeaders(req, host);
+              hDg.delete('authorization');
+              hDg.set('accept', 'application/json');
+              if (ckDg) hDg.set('cookie', ckDg);
+              const rDg = await fetch(upUrl.toString(), { method: 'GET', headers: hDg, redirect: 'manual' });
+              const scDg2 = typeof rDg.headers.getSetCookie === 'function' ? rDg.headers.getSetCookie() : [];
+              let dg2 = null;
+              try { dg2 = JSON.parse(await rDg.text()); } catch (eDgP2) { dg2 = null; }
+              /* heal when the retry beats the degraded answer: a real account
+               * (role != guest) or a different session id (cookie continuity
+               * restored). Tokens rotate, so only id/role can be compared. */
+              if (dg2 && dg2.token && (dg2.role !== 'guest' || dg2.id !== dg.id)) {
+                /* healed — serve the cookie-backed session; only the HEALED
+                 * session's cookies ride along (the stranger's must not). */
+                recoveryCookies = scDg2;
+                res = new Response(JSON.stringify(dg2), { status: rDg.status, headers: rDg.headers });
+                retried = 'dropauth';
+              }
+              /* else: the degraded answer already carries the cookie identity
+               * — keep it (no heal, no tag) */
             }
-            /* else: the degraded answer already carries the cookie identity
-             * — keep it (no heal, no tag) */
+            }
           }
         } catch (eDg) { /* probe failed — the original response stays */ }
       }
@@ -2566,8 +2743,20 @@ async function handle(req, event) {
         try {
           const scFirst = typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : [];
           if (isChatApi && res.status !== 429) {
+            /* v7.0: when the relay holds the user's session, its Bearer +
+             * jar are the best recovery material there is — the client's
+             * own credentials are what just failed. The auths re-run gets
+             * them too, so the refreshed cookies are USER cookies, and
+             * the retry rides the held session. */
+            let heldR = null;
+            try { heldR = await sessionRead(req); } catch (eHR) { heldR = null; }
+            const heldUserR = !!(heldR && heldR.token && heldR.role && heldR.role !== 'guest');
+            let heldJarR = '';
+            if (heldUserR) {
+              try { heldJarR = Object.keys(heldR.jar || {}).map((n) => n + '=' + heldR.jar[n]).join('; '); } catch (eJR) { heldJarR = ''; }
+            }
             const ck = mergeCookieList(
-              [req.headers.get('cookie') || '', req.headers.get('x-cookie') || ''], scFirst);
+              [mergeCookies(req.headers.get('cookie') || '', req.headers.get('x-cookie') || ''), heldJarR], scFirst);
             let scAuths = [];
             try {
               const rA = await fetch(new URL('/api/v1/auths/', upUrl).toString(), {
@@ -2580,17 +2769,36 @@ async function handle(req, event) {
                   'origin': 'https://' + host,
                   'referer': 'https://' + host + '/',
                   ...(ck ? { cookie: ck } : {}),
+                  ...(heldUserR ? { authorization: 'Bearer ' + heldR.token } : {}),
                 },
               });
               scAuths = typeof rA.headers.getSetCookie === 'function' ? rA.headers.getSetCookie() : [];
-              try { if (rA.body && rA.body.cancel) rA.body.cancel(); } catch (eC) { /* ignore */ }
+              /* v7.0: read the re-run's answer — when it is an auths
+               * answer, capture it. The re-run just ROTATED the upstream
+               * token (z.ai rotates on every auths call); without this,
+               * the slot would keep holding the pre-rotation token and
+               * the next boot's sticky heal would present a dead one. */
+              try {
+                const rAj = JSON.parse(await rA.text());
+                if (rAj && rAj.token && rAj.id) {
+                  const pCapRA = sessionCapture(req, '', [],
+                    { token: rAj.token, id: rAj.id, role: rAj.role || '', em: rAj.email || '', nm: rAj.name || '' });
+                  if (event && typeof event.waitUntil === 'function') { try { event.waitUntil(pCapRA); } catch (eWuRA) { pCapRA.catch(function () { }); } }
+                  else pCapRA.catch(function () { });
+                }
+              } catch (eRAb) {
+                try { if (rA.body && rA.body.cancel) rA.body.cancel(); } catch (eRAc) { /* ignore */ }
+              }
             } catch (eA) { /* refresh unavailable — retry with what we have */ }
             const ck2 = mergeCookieList([ck], scAuths);
             recoveryCookies = scFirst.concat(scAuths);
             const h2 = minimalHeaders(req, host);
             if (ck2) h2.set('cookie', ck2);
+            /* v7.0: the held session's Bearer beats the client's own
+             * (which just 401'd); without one, keep the original. */
             const authz = req.headers.get('authorization');
-            if (authz) h2.set('authorization', authz);
+            if (heldUserR) h2.set('authorization', 'Bearer ' + heldR.token);
+            else if (authz) h2.set('authorization', authz);
             const retryInit = { method: method, headers: h2, redirect: 'manual' };
             if (!isRead) {
               /* v6.5 POST recovery: replay the buffered body + its
@@ -2709,17 +2917,23 @@ async function handle(req, event) {
      * Reads only headers (set-cookie) + the request's Bearer, plus a
      * small JSON clone when this response IS an auths answer — the
      * original response body is never consumed. Runs via waitUntil so
-     * the proxy answer is never delayed by the cache write. */
+     * the proxy answer is never delayed by the cache write.
+     * v7.0: signin/signup answers are cloned too (the user session lands
+     * in the slot the MOMENT the user signs in — no boot auths needed),
+     * and the signout call itself is never captured (its Bearer is dead
+     * by design — it must not resurrect into the slot). */
     try {
-      if (host === chatHost(event)) {
+      if (host === chatHost(event) && !isSignoutCall) {
         const scAll = (typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : []).concat(recoveryCookies || []);
         let authsObj = null;
-        if (res.status === 200 && method === 'GET' && /^\/api\/v1\/auths\/?$/.test(upUrl.pathname) &&
+        const authsPlainGet = method === 'GET' && /^\/api\/v1\/auths\/?$/.test(upUrl.pathname);
+        const authsSignIn = method === 'POST' && /^\/api\/v1\/auths\/(signin|signup)\/?$/.test(upUrl.pathname);
+        if (res.status === 200 && (authsPlainGet || authsSignIn) &&
             (res.headers.get('content-type') || '').toLowerCase().includes('json')) {
           try {
             const probe = res.clone();
             const aj = JSON.parse(await probe.text());
-            if (aj && aj.token && aj.id) authsObj = { token: aj.token, id: aj.id, role: aj.role || '' };
+            if (aj && aj.token && aj.id) authsObj = { token: aj.token, id: aj.id, role: aj.role || '', em: aj.email || '', nm: aj.name || '' };
           } catch (ePr) { authsObj = null; }
         }
         let bearer = '';
@@ -2753,7 +2967,7 @@ async function handle(req, event) {
     reissueRawCookies(recoveryCookies, outHeaders); /* v6.4 recovery cookies ride along */
     maybeSetTokenCookie(req, outHeaders, event);
     outHeaders.set('x-final-url', res.url || upUrl.toString());
-    if (retried) outHeaders.set('x-zp-retry', (retried === 'dropauth' || retried === 'capacity') ? retried : '1');
+    if (retried) outHeaders.set('x-zp-retry', (retried === 'dropauth' || retried === 'capacity' || retried === 'sticky') ? retried : '1');
     const outCt = corsHeaders(req, outHeaders);
 
     if (ct.includes('text/html')) {
