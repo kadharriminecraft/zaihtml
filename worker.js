@@ -7,24 +7,27 @@
    signed in, and strangers who only have your relay address get
    a plain guest proxy. Nothing to configure, nothing to type.
 
-   WANT A KEY INSTEAD? Put your secret between the quotes on the
-   OWNER_KEY line just below, then Save & Deploy:
+   WANT IT FULLY PRIVATE INSTEAD? Put your secret between the
+   quotes on the OWNER_KEY line just below, then Save & Deploy:
 
         const OWNER_KEY = "my-secret-key";
 
-   With a key set, the relay hands its saved sign-in ONLY to apps
-   that type the same key once (the OWNER_KEY box on the pocket's
-   main page — tap the ? next to it for help). A Cloudflare
-   variable named OWNER_KEY also still works, but setting it here
-   is easier to find.
+   With a key set, the relay is YOURS ALONE: every feature — the
+   app, the session, everything — answers ONLY to apps that type
+   the same key once (the OWNER_KEY box on the pocket's main page
+   — tap the ? next to it for help). Anyone else holding your
+   relay address gets one honest "locked" answer and nothing at
+   all: no app, no proxying, no session. A Cloudflare variable
+   named OWNER_KEY also still works, but setting it here is
+   easier to find.
    ================================================================ */
-const OWNER_KEY = "Jesusisthebom";
+const OWNER_KEY = "";
 
 /* ============================================================
  * z.ai pocket — Cloudflare Worker relay — worker.js
- * BUILD: zp service 7.3 (the current one-and-only build)
+ * BUILD: zp service 7.4 (the current one-and-only build)
  *   Deploy check: /__status on the worker URL must answer
- *   "zp service 7.3" — if it says 6.0 … 7.2, an old copy is
+ *   "zp service 7.4" — if it says 6.0 … 7.3, an old copy is
  *   still deployed; replace it with this file.
  * ------------------------------------------------------------
  * WHAT THIS DOES (v5 — the "no-navigation" architecture)
@@ -292,6 +295,44 @@ const OWNER_KEY = "Jesusisthebom";
  *        answer: content-disposition: attachment (or a clearly
  *        binary content-type) is saved, never painted.
  *
+ *   v7.4 — THE SEED SCRIPT + THE FULL LOCK + THE HONEST STATUS.
+ *        (1) THE SEED: window.name does NOT survive into Chrome's
+ *        null-origin sandbox frames (verified live: name=EMPTY
+ *        inside the srcdoc even after the shell stamped the frame
+ *        name) — so the synchronous boot hydration reached NOBODY.
+ *        The app's first auths sailed out bare, and since 7.1's
+ *        owner gate the sticky injection could no longer rescue
+ *        it (the bare request carries no x-zp-owner): the app
+ *        opened SIGNED OUT even with the session saved and the
+ *        email showing (the exact report). Fix: the shell injects
+ *        the same snapshot as a real <script> at the very top of
+ *        the document — window.__ZP_SEED__ = {zp:1, ls, jar, ok} —
+ *        BEFORE the runtime patch, which reads it synchronously;
+ *        the app's first fetch carries the session Bearer, the
+ *        cookie jar AND the owner key. The 7.0-era sticky gate
+ *        then works exactly as designed. (2) THE FULL LOCK
+ *        (user: "if the owner key is set, people trying to use it
+ *        can't use the worker AT ALL unless they have the code"):
+ *        keyed mode now gates EVERYTHING — /__status answers
+ *        keylessly with a locked stub (no app entry), and every
+ *        other path (root, /__t, /__o, /p, /chat, /__diag,
+ *        /__clear, websockets, the catch-all) 403s without the
+ *        key. /__t/<token> and /__o/<token> stay open to VALID
+ *        tokens only — the app's subresources are browser-level
+ *        fetches that cannot carry headers — and the whole token
+ *        space is re-keyed with a mask derived from the OWNER_KEY
+ *        (never the key itself), so no pre-key or foreign token
+ *        decodes: the lock has no side door. (3) THE HONEST
+ *        STATUS: when the owner's own boot auths answers GUEST
+ *        and neither heal can recover the held session, the slot
+ *        is marked stale and /__session says so — the pocket
+ *        tells the user "the saved sign-in expired — sign in
+ *        again" instead of claiming a sign-in that no longer
+ *        applies. Any USER answer (re-sign-in, keep-alive)
+ *        clears it. The session slot's cache key is pinned to
+ *        the BASE token key, so setting/changing OWNER_KEY never
+ *        orphans an existing saved session.
+ *
  *   v7.1 — THE OWNER KEY (share-safe sessions). 7.0's session
  *        slot was OPEN: anyone holding the worker URL could GET
  *        /__session and read the login (and the sticky injection
@@ -433,7 +474,7 @@ const OWNER_KEY = "Jesusisthebom";
  *     upstream (hygiene for 6.8-era leftovers).
  * ============================================================ */
 
-const VERSION = 'zp service 7.3';
+const VERSION = 'zp service 7.4';
 
 /* z.ai first-party family (suffix match — covers subdomains) */
 const ALLOW = [
@@ -462,7 +503,21 @@ const ALLOW = [
  * with the runtime patch via window.__ZAI__.key (build asserts the
  * template carries exactly one TOK_KEY definition). ?url= is NOT
  * accepted: tokens are the only way in. */
-const TOK_KEY = 'zaiwtok-4-0-0-K9mVx2qT';
+const TOK_KEY_BASE = 'zaiwtok-4-0-0-K9mVx2qT';
+/* v7.4: keyed relays re-key the whole token space with a mask
+ * derived from the OWNER_KEY (never the key itself — the mask rides
+ * to the client as __ZAI__.key exactly like TOK_KEY always has, and
+ * only keyed requests ever receive a document carrying it). Every
+ * token minted BEFORE a key was set stops decoding, so held entry /
+ * subresource tokens are not a way around the full lock. The runtime
+ * patch mints with the same masked key, so everything stays in sync. */
+function fnvKeyMask(s) {
+  let h = 0x811c9dc5;
+  const b = new TextEncoder().encode(String(s || ''));
+  for (let i = 0; i < b.length; i++) { h ^= b[i]; h = (h + (h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24)) >>> 0; }
+  return h.toString(16) + '-' + b.length.toString(16);
+}
+const TOK_KEY = OWNER_KEY ? (TOK_KEY_BASE + '.' + fnvKeyMask(OWNER_KEY)) : TOK_KEY_BASE;
 
 function encTok(u) {
   const bytes = new TextEncoder().encode(String(u));
@@ -660,15 +715,21 @@ const PATCH_JS = [
 "    } catch (eD) { /* ignore */ }",
 "  }",
 "",
-"  /* ---------- v5: window.name boot hydration --------------------------",
+"  /* ---------- v5/v7.4: boot hydration ----------------------------------",
 "   * The shell stamps the frame's name with a snapshot {zp:1, ls, jar}",
-"   * BEFORE assigning the srcdoc \u2014 it is readable synchronously here,",
-"   * so the app's own scripts (which run after this patch) find their",
-"   * session cookies and localStorage already populated. No race. */",
+"   * BEFORE assigning the srcdoc \u2014 and v7.4 additionally injects the",
+"   * same snapshot as a REAL <script> at the very top of the document",
+"   * (window.__ZP_SEED__), because Chrome never copies window.name into",
+"   * a null-origin sandbox frame (verified live: name=EMPTY inside the",
+"   * srcdoc even after the shell stamped the frame name). Whichever way",
+"   * the snapshot arrives it is readable synchronously here, so the",
+"   * app's own scripts (which run after this patch) find their session",
+"   * cookies and localStorage already populated. No race. */",
 "  try {",
-"    if (SD && window.name) {",
-"      var boot = JSON.parse(window.name);",
-"      if (boot && boot.zp === 1) {",
+"    var boot = null;",
+"    try { if (window.__ZP_SEED__ && window.__ZP_SEED__.zp === 1) boot = window.__ZP_SEED__; } catch (eSS) { boot = null; }",
+"    if (!boot && SD && window.name) { try { boot = JSON.parse(window.name); } catch (eSN) { boot = null; } }",
+"    if (boot && boot.zp === 1) {",
 "        if (typeof boot.ok === 'string' && boot.ok) OKEY = boot.ok; /* v7.1 */",
 "        if (boot.ls && typeof boot.ls === 'object') {",
 "          Object.keys(boot.ls).forEach(function (k) { if (!(k in lsMirror)) lsMirror[k] = String(boot.ls[k]); });",
@@ -680,7 +741,6 @@ const PATCH_JS = [
 "          jar = Object.keys(jarMap).map(function (k) { return jarMap[k]; });",
 "        }",
 "      }",
-"    }",
 "  } catch (eN) { /* ignore */ }",
 "",
 "  /* ---------- messaging ---------- */",
@@ -2236,7 +2296,7 @@ const PATCH_JS = [
  * ============================================================ */
 
 const sessionHits = new Map(); /* ip -> {n, t} — /__session ops in the window */
-const SESSION_EMPTY = { jar: {}, token: '', role: '', id: '', em: '', nm: '', key: '', ts: 0 };
+const SESSION_EMPTY = { jar: {}, token: '', role: '', id: '', em: '', nm: '', key: '', stale: 0, ts: 0 };
 
 async function sha256Hex(str) {
   const dig = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
@@ -2272,7 +2332,11 @@ function sessionRateOk(req) {
 
 async function sessionKeyUrl(req) {
   const origin = new URL(req.url).origin;
-  return origin + '/__session/' + (await sha256Hex(TOK_KEY + '|zp-session-v1'));
+  /* v7.4: pinned to the BASE token key — the token space may re-key
+   * with the OWNER_KEY mask, but the stored session must NOT move:
+   * setting or changing a key would otherwise orphan the saved
+   * sign-in (the cache URL changes and the slot reads empty). */
+  return origin + '/__session/' + (await sha256Hex(TOK_KEY_BASE + '|zp-session-v1'));
 }
 
 /* ---- v7.1/v7.3: the OWNER KEY gate ----------------------------------
@@ -2354,17 +2418,18 @@ async function sessionRead(req) {
           em: typeof j.em === 'string' ? j.em : '',
           nm: typeof j.nm === 'string' ? j.nm : '',
           key: typeof j.key === 'string' ? j.key : '', /* v7.2: the auto-issued slot key */
+          stale: j.stale || 0, /* v7.4: the held sign-in died upstream — honest status */
           ts: j.ts || 0,
         };
       }
     }
   } catch (eR) { /* cache hiccup: act empty */ }
-  return { jar: {}, token: '', role: '', id: '', em: '', nm: '', key: '', ts: 0 };
+  return { jar: {}, token: '', role: '', id: '', em: '', nm: '', key: '', stale: 0, ts: 0 };
 }
 
 async function sessionWrite(req, st) {
   try {
-    const body = JSON.stringify({ jar: st.jar, token: st.token, role: st.role, id: st.id, em: st.em || '', nm: st.nm || '', key: st.key || '', ts: st.ts });
+    const body = JSON.stringify({ jar: st.jar, token: st.token, role: st.role, id: st.id, em: st.em || '', nm: st.nm || '', key: st.key || '', stale: st.stale || 0, ts: st.ts });
     const toStore = new Response(body, {
       headers: { 'content-type': 'application/json', 'cache-control': 'max-age=2592000' }, /* 30 days */
     });
@@ -2424,6 +2489,8 @@ async function sessionCapture(req, bearer, setCookieList, authsObj, opts) {
         if (st.token !== authsObj.token) { st.token = String(authsObj.token); changed = true; }
         if (st.id !== id) { st.id = id; changed = true; }
         if (role && st.role !== role) { st.role = role; changed = true; }
+        /* v7.4: a real USER answer is a live sign-in — any stale mark dies */
+        if (st.stale) { st.stale = 0; changed = true; }
         /* v7.0: remember who is signed in (for the pocket's status line) */
         const em = String(authsObj.em || '');
         const nm = String(authsObj.nm || '');
@@ -2434,6 +2501,15 @@ async function sessionCapture(req, bearer, setCookieList, authsObj, opts) {
         if (st.token !== authsObj.token) { st.token = String(authsObj.token); changed = true; }
         if (st.id !== id) { st.id = id; changed = true; }
         if (st.role !== 'guest') { st.role = 'guest'; changed = true; }
+      } else {
+        /* v7.4: THE HONEST STATUS — a GUEST auths answer bounced off
+         * a HELD user session. Every heal path (sticky, cookie
+         * continuity, the 401 re-run, keep-alive) funnels its FINAL
+         * answer through this capture, so landing here means the
+         * held sign-in is truly dead upstream: mark the slot so
+         * /__session tells the pocket the truth instead of an email
+         * that no longer applies. Any USER answer clears it (above). */
+        if (!st.stale) { st.stale = Date.now(); changed = true; }
       }
     }
     /* (2) a Bearer on any request keeps the token fresh when it is
@@ -2453,7 +2529,20 @@ async function sessionCapture(req, bearer, setCookieList, authsObj, opts) {
         if (id && st.id !== id) { st.id = id; changed = true; }
       }
     }
-    if (changed) { st.ts = Date.now(); await sessionWrite(req, st); }
+    if (changed) {
+      st.ts = Date.now();
+      /* v7.4: a stale mark set by a concurrent capture may land
+       * between this capture's read and write — our snapshot would
+       * silently erase it. Only a real USER answer clears the mark
+       * (above, authsUserWon); any other write must preserve it. */
+      if (!authsUserWon) {
+        try {
+          const curSt = await sessionRead(req);
+          if (curSt && curSt.stale && !st.stale) st.stale = curSt.stale;
+        } catch (ePRS) { /* ignore */ }
+      }
+      await sessionWrite(req, st);
+    }
   } catch (eS) { /* capture must never break the proxy */ }
 }
 
@@ -2507,7 +2596,7 @@ async function handleSession(req, url, event) {
     return json({
       ok: true, has: has, savedAt: st.ts || 0, token: st.token || '',
       role: st.role || '', id: st.id || '', email: st.em || '', name: st.nm || '',
-      jar: jar,
+      stale: !!st.stale, jar: jar,
     }, req);
   }
   if (method === 'DELETE') {
@@ -2660,6 +2749,41 @@ async function handle(req, event) {
     /* ---- CORS preflight ---- */
     if (method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: corsHeaders(req, new Headers()) });
+    }
+
+    /* ---- v7.4: THE FULL LOCK (keyed mode) ------------------------------
+     * OWNER_KEY set: the relay is the owner's alone — no app, no
+     * proxying, no diagnostics without the key. Two exceptions:
+     * /__status answers keylessly as a locked stub (the pocket's
+     * health probe still works; the app entry token exists only for
+     * the key holder), and /__t + /__o stay open to VALID tokens
+     * only — the app's subresources are browser-level fetches that
+     * cannot carry headers. The whole token space is re-keyed with
+     * a mask derived from the OWNER_KEY (see TOK_KEY above), so no
+     * pre-key or foreign token decodes: the lock has no side door. */
+    if (ownerKeyOf(event) && !(await ownerKeyOk(req, event))) {
+      const lockP = url.pathname;
+      if (lockP === '/__status') {
+        return json({ ok: true, name: VERSION, time: new Date().toISOString(), session: true, session_mode: 'keyed', locked: true }, req);
+      }
+      let tokOk = false;
+      if (lockP.startsWith('/__t/')) {
+        try {
+          const decL = decTok(lockP.slice(5));
+          tokOk = !!(decL && /^https?:\/\//i.test(decL) && hostAllowed(new URL(decL).host, event));
+        } catch (eLT) { tokOk = false; }
+      } else if (lockP.startsWith('/__o/')) {
+        try {
+          const restL = lockP.slice(5);
+          const slashL = restL.indexOf('/');
+          const otokL = slashL < 0 ? restL : restL.slice(0, slashL);
+          const decL = decTok(otokL);
+          tokOk = !!(decL && /^https?:\/\/[a-z0-9.:-]+\/?$/i.test(decL) && hostAllowed(new URL(decL.replace(/\/+$/, '') + '/').host, event));
+        } catch (eLO) { tokOk = false; }
+      }
+      if (!tokOk) {
+        return json({ ok: false, mode: 'keyed', error: 'locked — this relay answers only to its owner key' }, req, 403);
+      }
     }
 
     /* ---- public endpoints ---- */
@@ -3026,11 +3150,14 @@ async function handle(req, event) {
           if (dg && dg.role === 'guest' && dg.token && dg.id && dg.id !== bearerId) {
             /* ---- v7.0 STICKY: re-ask with the relay-held session first ----
              * v7.1: only for the OWNER (x-zp-owner matched) — a
-             * stranger's degraded boot must boot as themselves. */
+             * stranger's degraded boot must boot as themselves.
+             * v7.4: if no heal produces a USER answer, the capture
+             * below marks the held session stale (honest status). */
             let stickyOk = false;
+            let heldUser = false;
             try {
               const heldSt = await sessionRead(req);
-              const heldUser = !!(heldSt && heldSt.token && heldSt.role && heldSt.role !== 'guest');
+              heldUser = !!(heldSt && heldSt.token && heldSt.role && heldSt.role !== 'guest');
               if (heldUser && reqOwnerOk) {
                 const hSt = minimalHeaders(req, host);
                 hSt.set('accept', 'application/json');
