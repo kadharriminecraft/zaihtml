@@ -21,7 +21,7 @@
    named OWNER_KEY also still works, but setting it here is
    easier to find.
    ================================================================ */
-const OWNER_KEY = "";
+const OWNER_KEY = "Jesusisthebom";
 
 /* ============================================================
  * z.ai pocket — Cloudflare Worker relay — worker.js
