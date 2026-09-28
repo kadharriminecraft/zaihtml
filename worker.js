@@ -1,8 +1,8 @@
 /* ============================================================
  * z.ai pocket — Cloudflare Worker relay — worker.js
- * BUILD: zp service 7.0 (the current one-and-only build)
+ * BUILD: zp service 7.1 (the current one-and-only build)
  *   Deploy check: /__status on the worker URL must answer
- *   "zp service 7.0" — if it says 6.0 … 6.9, an old copy is
+ *   "zp service 7.1" — if it says 6.0 … 7.0, an old copy is
  *   still deployed; replace it with this file.
  * ------------------------------------------------------------
  * WHAT THIS DOES (v5 — the "no-navigation" architecture)
@@ -226,6 +226,31 @@
  *        backup; /__status now reports vault_auto:true so the
  *        pocket only calls the new endpoint on 6.8+.
  *
+ *   v7.1 — THE OWNER KEY (share-safe sessions). 7.0's session
+ *        slot was OPEN: anyone holding the worker URL could GET
+ *        /__session and read the login (and the sticky injection
+ *        would boot them straight into the account) — fine for a
+ *        private relay, wrong the moment the app gets handed
+ *        around (user: "if I give someone my worker URL and the
+ *        app, would they magically be in my account?" — they
+ *        would have). Now the session features answer to a key:
+ *        set the Workers variable OWNER_KEY (any long secret) and
+ *        every session operation — reading /__session, capturing
+ *        into it, sticky injection, the 401-recovery assist, and
+ *        forgetting — requires the request to carry
+ *        x-zp-owner: <the same key>. The pocket stores the key
+ *        per relay and stamps it into the sandbox boot so the
+ *        app's own api calls ride with it; a stranger holding the
+ *        URL + the app gets a plain guest proxy and can never
+ *        touch the slot. A worker WITHOUT OWNER_KEY runs its
+ *        session features OFF entirely (the safe default for a
+ *        fresh deploy) — /__status says session:false,
+ *        session_mode:"off", and the pocket's status line tells
+ *        the owner exactly which variable to add. The header is
+ *        stripped before anything goes upstream, and the runtime
+ *        patch only ever sends it to WORKER-origin requests (it
+ *        never rides to a third-party host).
+ *
  *   v6.9 — THE RELAY KEEPS THE SESSION OPEN (single-user mode).
  *        User verdict on 6.7/6.8: "I don't care for the backups
  *        or anything — get rid of all that. Find a new way to
@@ -273,13 +298,21 @@
  *          background auths keep-alive (the session never idles
  *          out from merely OPENING the file).
  *
+ *   DEPLOY step 4 now reads: (required for staying signed in)
+ *        Settings → Variables → OWNER_KEY with a long random
+ *        string ONLY YOU KNOW — it is the key that gates the
+ *        relay-held session. Without it the worker is a plain
+ *        shareable guest proxy (safe to hand to anyone).
+ *
  * DEPLOY (you already have a worker)
  *   1. dash.cloudflare.com → Workers & Pages → your worker
  *   2. "Edit code" / Quick Edit → select all → paste this file
  *   3. Save & Deploy
- *   4. (optional) Settings → Variables → PROXY_TOKEN with a long
- *      random string, and/or EXTRA_HOSTS="a.com,b.com" to
- *      allowlist more first-party hosts.
+ *   4. Settings → Variables → OWNER_KEY = a long random string
+ *      only you know (REQUIRED for staying signed in — it is
+ *      what keeps anyone else holding your worker URL out of
+ *      your z.ai account). Optional: PROXY_TOKEN, and/or
+ *      EXTRA_HOSTS="a.com,b.com" to allowlist more hosts.
  *   5. Save the new zai-pocket.html on the phone and use its
  *      "Open Z.ai (sandboxed)" button — the app streams into the
  *      file through this worker. Do NOT open the worker URL in
@@ -335,7 +368,7 @@
  *     upstream (hygiene for 6.8-era leftovers).
  * ============================================================ */
 
-const VERSION = 'zp service 7.0';
+const VERSION = 'zp service 7.1';
 
 /* z.ai first-party family (suffix match — covers subdomains) */
 const ALLOW = [
@@ -440,6 +473,11 @@ const PATCH_JS = [
 "  var HOST = (CFG.host || '').toLowerCase(); // upstream host this document belongs to",
 "  var WORKER = CFG.worker || '';      // worker origin, e.g. https://name.workers.dev",
 "  var TOKEN = CFG.token || '';        // optional shared proxy token",
+"  var OKEY = '';                       // v7.1: the owner key the shell\n" +
+"                                      // stamps into the boot (frame.name)\n" +
+"                                      // and refreshes via 'init' — rides as\n" +
+"                                      // x-zp-owner on WORKER-destination\n" +
+"                                      // requests only, never to a 3rd party",
 "  var ALLOW = CFG.allow || [];        // allowlisted host suffixes",
 "  var KEY = CFG.key || '';            // v4 opaque-token key (shared with the worker)",
 "  var TOK = !!CFG.tok;                // true when this doc was served through /__t/<token>",
@@ -566,6 +604,7 @@ const PATCH_JS = [
 "    if (SD && window.name) {",
 "      var boot = JSON.parse(window.name);",
 "      if (boot && boot.zp === 1) {",
+"        if (typeof boot.ok === 'string' && boot.ok) OKEY = boot.ok; /* v7.1 */",
 "        if (boot.ls && typeof boot.ls === 'object') {",
 "          Object.keys(boot.ls).forEach(function (k) { if (!(k in lsMirror)) lsMirror[k] = String(boot.ls[k]); });",
 "        }",
@@ -871,8 +910,22 @@ const PATCH_JS = [
 "    }",
 "  } catch (eCookieShim) { /* ignore */ }",
 "",
+"  /* ---------- v7.1: is this destination the WORKER? --------------------",
+"   * The owner key rides ONLY on requests the relay itself will see\n" +
+"   * (worker-origin URLs, or relative paths that resolve onto the\n" +
+"   * worker via <base>/same-origin). A beacon or asset fetched\n" +
+"   * DIRECTLY from a third-party host never sees the key. */",
+"  function workerDest(u) {",
+"    try {",
+"      var s = String(u || '');",
+"      if (!s) return false;",
+"      if (/^https?:\\/\\//i.test(s)) return isWorkerUrl(s);",
+"      return s.charAt(0) === '/';",
+"    } catch (e) { return false; }",
+"  }",
+"",
 "  /* ---------- header injection ---------- */",
-"  function applyHeaders(h) {",
+"  function applyHeaders(h, ours) {",
 "    try {",
 "      /* v6.4: ALWAYS refresh x-cookie with the current jar. The z.ai",
 "       * boot script shares ONE headers object across its auths / config /",
@@ -886,6 +939,10 @@ const PATCH_JS = [
 "      if (ch) h.set('x-cookie', ch);",
 "      else { try { h.delete('x-cookie'); } catch (eDel) { /* ignore */ } }",
 "      if (TOKEN && !h.has('x-proxy-token')) h.set('x-proxy-token', TOKEN);",
+"      /* v7.1: the owner key rides on WORKER-destination requests only",
+"       * (ours === true) — the relay uses it to gate capture / sticky",
+"       * / recovery, and it is stripped before anything goes upstream. */",
+"      if (OKEY && ours) { try { h.set('x-zp-owner', OKEY); } catch (eOK) { /* ignore */ } }",
 "    } catch (e) { /* ignore */ }",
 "    return h;",
 "  }",
@@ -944,7 +1001,7 @@ const PATCH_JS = [
 "            try { input.headers.forEach(function (v, k) { H.set(k, v); }); } catch (eIH) { /* ignore */ }",
 "          } else { H = new Headers(); }",
 "        } catch (e3) { H = new Headers(); }",
-"        init.headers = applyHeaders(H);",
+"        init.headers = applyHeaders(H, workerDest((typeof input === 'string') ? input : (input && input.url) || ''));",
 "        var iu = '';",
 "        try { iu = (typeof input === 'string') ? input : (input && typeof input.url === 'string') ? input.url : ''; } catch (eIU) { iu = ''; }",
 "        var meth = 'GET';",
@@ -1040,6 +1097,7 @@ const PATCH_JS = [
 "    XMLHttpRequest.prototype.open = function (method, url) {",
 "      try {",
 "        var mu = mapUrl(String(url));",
+"        this.__zpDst = (mu !== String(url)) ? absW(mu) : String(url); /* v7.1: remember the destination */",
 "        if (mu !== String(url)) {",
 "          mu = absW(mu);",
 "          if (arguments.length > 2) {",
@@ -1061,6 +1119,7 @@ const PATCH_JS = [
 "        var ch = cookieHeader();",
 "        if (ch) this.setRequestHeader('x-cookie', ch);",
 "        if (TOKEN) this.setRequestHeader('x-proxy-token', TOKEN);",
+"        if (OKEY && workerDest(this.__zpDst)) { try { this.setRequestHeader('x-zp-owner', OKEY); } catch (eOK) { /* ignore */ } } /* v7.1 */",
 "      } catch (e) { /* ignore */ }",
 "      var xhr = this;",
 "      try {",
@@ -1909,6 +1968,7 @@ const PATCH_JS = [
 "      }",
 "      switch (d.cmd) {",
 "        case 'init':",
+"          if (typeof d.ok === 'string' && d.ok) OKEY = d.ok; /* v7.1: the shell refreshes the owner key */",
 "          if (Array.isArray(d.jar)) {",
 "            var jarM = {};",
 "            jar.forEach(function (c) { if (c && c.name) jarM[c.name] = c; });",
@@ -2061,6 +2121,34 @@ async function sessionKeyUrl(req) {
   return origin + '/__session/' + (await sha256Hex(TOK_KEY + '|zp-session-v1'));
 }
 
+/* ---- v7.1: the OWNER KEY gate ---------------------------------------
+ * The Workers variable OWNER_KEY (any long secret, set in the
+ * Cloudflare dashboard) is what makes the session features
+ * PRIVATE to the owner. Every session operation — GET/DELETE
+ * /__session, passive capture, sticky injection, the 401-recovery
+ * assist, and the signout-forget — requires the request to carry
+ * x-zp-owner: <the same key>. Comparisons are SHA-256 on both
+ * sides (never a raw string compare), and the header is stripped
+ * before anything is forwarded upstream (see skipReq). A worker
+ * with NO OWNER_KEY simply runs its session features OFF: the
+ * relay works as a plain shareable guest proxy, and /__status
+ * says so — the safe default for a fresh deploy. */
+function ownerKeyOf(event) {
+  const env = envOf(event) || {};
+  return String(env.OWNER_KEY || env.ZP_OWNER_KEY || '').trim();
+}
+async function ownerKeyOk(req, event) {
+  const want = ownerKeyOf(event);
+  if (!want) return false;
+  const got = String(req.headers.get('x-zp-owner') || '').trim();
+  if (!got) return false;
+  try {
+    const a = await sha256Hex('zp-owner-v1|' + want);
+    const b = await sha256Hex('zp-owner-v1|' + got);
+    return a === b;
+  } catch (eK) { return false; }
+}
+
 async function sessionRead(req) {
   try {
     const hit = await caches.default.match(await sessionKeyUrl(req));
@@ -2174,6 +2262,16 @@ async function handleSession(req, url, event) {
   const method = req.method.toUpperCase();
   if (!sessionRateOk(req)) {
     return json({ ok: false, error: 'too many requests — wait two minutes and try again' }, req, 429);
+  }
+  /* v7.1: the owner key gates the whole endpoint. No OWNER_KEY
+   * configured -> the session features are OFF on this worker (a
+   * shareable guest proxy — nobody can read or write a session
+   * here). OWNER_KEY configured -> the key must match. */
+  if (!ownerKeyOf(event)) {
+    return json({ ok: false, mode: 'off', error: 'staying signed in is OFF on this worker — set the OWNER_KEY variable (Settings → Variables) to enable it' }, req, 404);
+  }
+  if (!(await ownerKeyOk(req, event))) {
+    return json({ ok: false, mode: 'keyed', error: 'wrong or missing owner key (x-zp-owner)' }, req, 403);
   }
   if (method === 'GET' || method === 'HEAD') {
     const st = await sessionRead(req);
@@ -2362,7 +2460,13 @@ async function handle(req, event) {
        * the token key or the upstream host. Neutral JSON: no z.ai
        * strings anywhere in this body. */
       const entry = tokPath(chatUpstream(event) + '/');
-      return json({ ok: true, name: VERSION, time: new Date().toISOString(), token_required: !!token, token_ok: tokenOk, session: true, entry: entry }, req);
+      /* v7.1: session features are ON only when OWNER_KEY is set —
+       * session_mode tells the pocket WHICH state it is in ("keyed"
+       * = bring the owner key; "off" = add the OWNER_KEY variable;
+       * absent = a pre-7.1 open relay, restore still works but the
+       * pocket warns that anyone with the URL can read it). */
+      const okKey = ownerKeyOf(event);
+      return json({ ok: true, name: VERSION, time: new Date().toISOString(), token_required: !!token, token_ok: tokenOk, session: !!okKey, session_mode: okKey ? 'keyed' : 'off', entry: entry }, req);
     }
 
     /* ---- neutral favicon: never a proxied page ---- */
@@ -2522,7 +2626,9 @@ async function handle(req, event) {
     const h = new Headers();
     const skipReq = new Set(['host', 'origin', 'referer', 'cookie', 'connection', 'keep-alive', 'upgrade',
       'proxy-connection', 'te', 'trailer', 'transfer-encoding', 'content-length', 'accept-encoding',
-      'x-cookie', 'x-proxy-token', 'x-set-cookie']);
+      'x-cookie', 'x-proxy-token', 'x-set-cookie', 'x-zp-owner']);
+    /* v7.1: x-zp-owner is this relay's OWN gate header (the owner
+     * key the pocket sends) — it must NEVER ride upstream. */
     /* v3: Cloudflare's edge injects its own connection headers
      * (cf-connecting-ip, cf-ipcountry, cf-ray, cf-visitor,
      * x-forwarded-for, cdn-loop, true-client-ip, ...) into every
@@ -2583,6 +2689,17 @@ async function handle(req, event) {
       }
     }
 
+    /* ---- v7.1: does THIS request carry the owner key? --------------
+     * One evaluation, reused by every session feature below: passive
+     * capture, the sticky heal, the 401-recovery assist and the
+     * signout-forget. A request without the key (a stranger holding
+     * the worker URL + a pocket copy) proxies as a plain guest — it
+     * can never read, write, inject or forget the owner's session. */
+    let reqOwnerOk = false;
+    if (host === chatHost(event) && ownerKeyOf(event)) {
+      try { reqOwnerOk = await ownerKeyOk(req, event); } catch (eOK) { reqOwnerOk = false; }
+    }
+
     let res;
     let retried = false;
     let recoveryCookies = []; /* v6.4: fresh set-cookies gathered below */
@@ -2592,9 +2709,12 @@ async function handle(req, event) {
      * sessions, new pages and wiped phones must all stay inert
      * ("I don't want any chance of me getting logged out from a new
      * page"). The request itself still goes through untouched, so
-     * z.ai kills its side of the session too. */
+     * z.ai kills its side of the session too.
+     * v7.1: only the OWNER's signout forgets — a stranger signing
+     * out of their own guest session inside this relay must never
+     * touch the owner's slot. */
     const isSignoutCall = host === chatHost(event) && /^\/api\/v1\/auths\/signout\/?$/.test(upUrl.pathname);
-    if (isSignoutCall) {
+    if (isSignoutCall && reqOwnerOk) {
       try {
         const pForget = (async function () {
           try { await caches.default.delete(await sessionKeyUrl(req)); } catch (eFd) { /* idempotent */ }
@@ -2667,12 +2787,14 @@ async function handle(req, event) {
             }
           } catch (eId) { bearerId = '??'; }
           if (dg && dg.role === 'guest' && dg.token && dg.id && dg.id !== bearerId) {
-            /* ---- v7.0 STICKY: re-ask with the relay-held session first ---- */
+            /* ---- v7.0 STICKY: re-ask with the relay-held session first ----
+             * v7.1: only for the OWNER (x-zp-owner matched) — a
+             * stranger's degraded boot must boot as themselves. */
             let stickyOk = false;
             try {
               const heldSt = await sessionRead(req);
               const heldUser = !!(heldSt && heldSt.token && heldSt.role && heldSt.role !== 'guest');
-              if (heldUser) {
+              if (heldUser && reqOwnerOk) {
                 const hSt = minimalHeaders(req, host);
                 hSt.set('accept', 'application/json');
                 hSt.set('authorization', 'Bearer ' + heldSt.token);
@@ -2750,7 +2872,11 @@ async function handle(req, event) {
              * the retry rides the held session. */
             let heldR = null;
             try { heldR = await sessionRead(req); } catch (eHR) { heldR = null; }
-            const heldUserR = !!(heldR && heldR.token && heldR.role && heldR.role !== 'guest');
+            /* v7.1: the held session is OWNER material — a request
+             * without the owner key recovers with its own credentials
+             * only (a stranger's 401 must never be answered with the
+             * owner's session — that would BE the account leak). */
+            const heldUserR = !!(reqOwnerOk && heldR && heldR.token && heldR.role && heldR.role !== 'guest');
             let heldJarR = '';
             if (heldUserR) {
               try { heldJarR = Object.keys(heldR.jar || {}).map((n) => n + '=' + heldR.jar[n]).join('; '); } catch (eJR) { heldJarR = ''; }
@@ -2777,10 +2903,12 @@ async function handle(req, event) {
                * answer, capture it. The re-run just ROTATED the upstream
                * token (z.ai rotates on every auths call); without this,
                * the slot would keep holding the pre-rotation token and
-               * the next boot's sticky heal would present a dead one. */
+               * the next boot's sticky heal would present a dead one.
+               * v7.1: owner-only — a stranger's recovery re-run must
+               * not write their (guest) rotation into the owner slot. */
               try {
                 const rAj = JSON.parse(await rA.text());
-                if (rAj && rAj.token && rAj.id) {
+                if (rAj && rAj.token && rAj.id && reqOwnerOk) {
                   const pCapRA = sessionCapture(req, '', [],
                     { token: rAj.token, id: rAj.id, role: rAj.role || '', em: rAj.email || '', nm: rAj.name || '' });
                   if (event && typeof event.waitUntil === 'function') { try { event.waitUntil(pCapRA); } catch (eWuRA) { pCapRA.catch(function () { }); } }
@@ -2921,9 +3049,12 @@ async function handle(req, event) {
      * v7.0: signin/signup answers are cloned too (the user session lands
      * in the slot the MOMENT the user signs in — no boot auths needed),
      * and the signout call itself is never captured (its Bearer is dead
-     * by design — it must not resurrect into the slot). */
+     * by design — it must not resurrect into the slot).
+     * v7.1: capture is OWNER-ONLY (x-zp-owner matched) — a guest or a
+     * stranger signing into THEIR account through this relay must
+     * never write (let alone overwrite) the owner's slot. */
     try {
-      if (host === chatHost(event) && !isSignoutCall) {
+      if (host === chatHost(event) && !isSignoutCall && reqOwnerOk) {
         const scAll = (typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : []).concat(recoveryCookies || []);
         let authsObj = null;
         const authsPlainGet = method === 'GET' && /^\/api\/v1\/auths\/?$/.test(upUrl.pathname);
