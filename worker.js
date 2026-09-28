@@ -1,8 +1,8 @@
 /* ============================================================
  * z.ai pocket — Cloudflare Worker relay — worker.js
- * BUILD: zp service 7.1 (the current one-and-only build)
+ * BUILD: zp service 7.2 (the current one-and-only build)
  *   Deploy check: /__status on the worker URL must answer
- *   "zp service 7.1" — if it says 6.0 … 7.0, an old copy is
+ *   "zp service 7.2" — if it says 6.0 … 7.1, an old copy is
  *   still deployed; replace it with this file.
  * ------------------------------------------------------------
  * WHAT THIS DOES (v5 — the "no-navigation" architecture)
@@ -226,6 +226,56 @@
  *        backup; /__status now reports vault_auto:true so the
  *        pocket only calls the new endpoint on 6.8+.
  *
+ *   v7.2 — AUTO MODE (zero-setup share-safe sessions). The 7.1
+ *        fix was right but cost a dashboard trip: set OWNER_KEY by
+ *        hand, tell friends to do the same (user: "it's hard for me
+ *        to set the owner key... giving it to people they won't
+ *        know either"). Now a worker deployed with NO variables at
+ *        all locks itself to the first account that signs in on
+ *        it: that auths answer CLAIMS the slot — the worker mints
+ *        a random 128-bit key, stores it WITH the session, and
+ *        hands it to that one device on x-zp-claim (the pocket
+ *        saves it like a typed key, silently; the runtime patch
+ *        forwards it, and the shell pushes it back into a running
+ *        sandbox so capture continues mid-session). A wiped phone
+ *        or new device signs in again — same account, keyless —
+ *        and the worker RE-ISSUES the key automatically. Anyone
+ *        else holding the URL (no key, different account) still
+ *        gets a plain guest proxy: no read, no claim, no refresh,
+ *        no forget. A pre-7.2 slot counts as claimed by its held
+ *        account, so only the same account can adopt it.
+ *        OWNER_KEY remains fully supported as an optional MASTER
+ *        key: set it and the relay runs strict keyed mode (exactly
+ *        7.1 — nothing is ever auto-claimed); set it later and it
+ *        also unlocks an auto-claimed slot. /__status now always
+ *        says session:true with session_mode "auto" (default) or
+ *        "keyed" (OWNER_KEY set).
+ *
+ *   v7.2 — AUTO MODE (zero-setup share-safe sessions). The 7.1
+ *        fix was right but cost a dashboard trip: set OWNER_KEY by
+ *        hand, tell friends to do the same (user: "it's hard for me
+ *        to set the owner key... giving it to people they won't
+ *        know either"). Now a worker deployed with NO variables at
+ *        all locks itself to the first account that signs in on
+ *        it: that auths answer CLAIMS the slot — the worker mints
+ *        a random 128-bit key, stores it WITH the session, and
+ *        hands it to that one device on x-zp-claim (the pocket
+ *        saves it like a typed key, silently; the runtime patch
+ *        forwards it, and the shell pushes it back into a running
+ *        sandbox so capture continues mid-session). A wiped phone
+ *        or new device signs in again — same account, keyless —
+ *        and the worker RE-ISSUES the key automatically. Anyone
+ *        else holding the URL (no key, different account) still
+ *        gets a plain guest proxy: no read, no claim, no refresh,
+ *        no forget. A pre-7.2 slot counts as claimed by its held
+ *        account, so only the same account can adopt it.
+ *        OWNER_KEY remains fully supported as an optional MASTER
+ *        key: set it and the relay runs strict keyed mode (exactly
+ *        7.1 — nothing is ever auto-claimed); set it later and it
+ *        also unlocks an auto-claimed slot. /__status now always
+ *        says session:true with session_mode "auto" (default) or
+ *        "keyed" (OWNER_KEY set).
+ *
  *   v7.1 — THE OWNER KEY (share-safe sessions). 7.0's session
  *        slot was OPEN: anyone holding the worker URL could GET
  *        /__session and read the login (and the sticky injection
@@ -298,25 +348,24 @@
  *          background auths keep-alive (the session never idles
  *          out from merely OPENING the file).
  *
- *   DEPLOY step 4 now reads: (required for staying signed in)
- *        Settings → Variables → OWNER_KEY with a long random
- *        string ONLY YOU KNOW — it is the key that gates the
- *        relay-held session. Without it the worker is a plain
- *        shareable guest proxy (safe to hand to anyone).
+ *   DEPLOY — that's it, no step 4 anymore: sign in once through
+ *        the app and the relay locks to that account. (Optional:
+ *        Settings → Variables → OWNER_KEY switches the relay to
+ *        strict keyed mode instead — v7.1 behavior.)
  *
  * DEPLOY (you already have a worker)
  *   1. dash.cloudflare.com → Workers & Pages → your worker
  *   2. "Edit code" / Quick Edit → select all → paste this file
  *   3. Save & Deploy
- *   4. Settings → Variables → OWNER_KEY = a long random string
- *      only you know (REQUIRED for staying signed in — it is
- *      what keeps anyone else holding your worker URL out of
- *      your z.ai account). Optional: PROXY_TOKEN, and/or
- *      EXTRA_HOSTS="a.com,b.com" to allowlist more hosts.
+ *   4. NOTHING — no variables needed. Open the app, sign in once,
+ *      and this relay locks itself to that account (the key is
+ *      minted, stored and delivered automatically). Optional:
+ *      OWNER_KEY = a long random string switches to strict keyed
+ *      mode instead; PROXY_TOKEN, and/or EXTRA_HOSTS="a.com,b.com"
+ *      to allowlist more hosts.
  *   5. Save the new zai-pocket.html on the phone and use its
  *      "Open Z.ai (sandboxed)" button — the app streams into the
- *      file through this worker. Do NOT open the worker URL in
- *      the browser; it is only a relay now.
+ *      file through this worker. Do NOT open the worker URL in *      the browser; it is only a relay now.
  *
  * ROUTES
  *   /            -> neutral service page (token setup form when
@@ -368,7 +417,7 @@
  *     upstream (hygiene for 6.8-era leftovers).
  * ============================================================ */
 
-const VERSION = 'zp service 7.1';
+const VERSION = 'zp service 7.2';
 
 /* z.ai first-party family (suffix match — covers subdomains) */
 const ALLOW = [
@@ -1072,6 +1121,14 @@ const PATCH_JS = [
 "        });",
 "        pr.then(function (r) {",
 "          try { ingestSetCookie(r.headers && r.headers.get('x-set-cookie')); } catch (e4) { /* ignore */ }",
+"          /* v7.2: this relay just locked itself to the account that",
+"           * signed in (or re-issued its key to a returning device) —",
+"           * hand the key to the SHELL, which saves it next to the",
+"           * relay address and rides it on every later request. */",
+"          try {",
+"            var ckK = r.headers && r.headers.get('x-zp-claim');",
+"            if (ckK) up({ type: 'claim', key: String(ckK) });",
+"          } catch (eCK) { /* ignore */ }",
 "          /* v6.4: the worker's session recovery healed this call by",
 "           * dropping a stale Bearer (x-zp-retry: dropauth) — clear the",
 "           * matching stale token from localStorage so the NEXT boot is",
@@ -1125,6 +1182,10 @@ const PATCH_JS = [
 "      try {",
 "        xhr.addEventListener('loadend', function () {",
 "          try { ingestSetCookie(xhr.getResponseHeader && xhr.getResponseHeader('x-set-cookie')); } catch (e2) { /* ignore */ }",
+"          try {",
+"            var ckX = xhr.getResponseHeader && xhr.getResponseHeader('x-zp-claim');",
+"            if (ckX) up({ type: 'claim', key: String(ckX) });",
+"          } catch (eCX) { /* ignore */ }",
 "        });",
 "      } catch (e3) { /* ignore */ }",
 "      return _send.apply(this, arguments);",
@@ -1986,6 +2047,12 @@ const PATCH_JS = [
 "        case 'back': history.back(); break;",
 "        case 'forward': history.forward(); break;",
 "        case 'reload': location.reload(); break;",
+"        case 'key':",
+"          /* v7.2: the shell hands the runtime its slot key mid-session",
+"           * (a claim that just landed) so capture and the recovery",
+"           * assists work from this request on. */",
+"          if (typeof d.ok === 'string' && d.ok) OKEY = d.ok;",
+"          break;",
 "        case 'navigate':",
 "          if (d.url) location.href = mapUrl(String(d.url));",
 "          break;",
@@ -2082,7 +2149,7 @@ const PATCH_JS = [
  * ============================================================ */
 
 const sessionHits = new Map(); /* ip -> {n, t} — /__session ops in the window */
-const SESSION_EMPTY = { jar: {}, token: '', role: '', id: '', em: '', nm: '', ts: 0 };
+const SESSION_EMPTY = { jar: {}, token: '', role: '', id: '', em: '', nm: '', key: '', ts: 0 };
 
 async function sha256Hex(str) {
   const dig = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
@@ -2149,6 +2216,42 @@ async function ownerKeyOk(req, event) {
   } catch (eK) { return false; }
 }
 
+/* ---- v7.2: AUTO mode — the relay locks itself to the first account
+ * that signs in on it. No dashboard variables, nothing to type: the
+ * first USER auths answer through a fresh relay CLAIMS the slot — the
+ * worker mints a random 128-bit key, stores it WITH the session, and
+ * hands it to that one device on the x-zp-claim response header (the
+ * pocket saves it next to the relay address, exactly like a typed
+ * OWNER_KEY, and rides it on its traffic from then on). A phone that
+ * loses it (wipe, new device) just signs in again: a keyless USER
+ * answer for the SAME account re-issues the key to the new device.
+ * Anyone else holding the worker URL — no key, different account —
+ * proxies as a plain guest: they can never read, claim, refresh or
+ * forget the held session. The Cloudflare OWNER_KEY variable remains
+ * supported as an optional MASTER key (v7.1 behavior): when it is
+ * set, the relay runs in strict "keyed" mode and nothing is ever
+ * auto-claimed; when set LATER it also unlocks any auto-claimed
+ * slot. A pre-7.2 slot (7.0-era, no key) counts as claimed by its
+ * held account: only a same-account sign-in can adopt it. */
+function newSlotKey() {
+  const b = new Uint8Array(16);
+  crypto.getRandomValues(b);
+  let s = 'zp-auto-';
+  for (let i = 0; i < b.length; i++) s += b[i].toString(16).padStart(2, '0');
+  return s;
+}
+async function slotKeyOk(req, st) {
+  const want = String((st && st.key) || '').trim();
+  if (!want) return false;
+  const got = String(req.headers.get('x-zp-owner') || '').trim();
+  if (!got) return false;
+  try {
+    const a = await sha256Hex('zp-owner-v1|' + want);
+    const b = await sha256Hex('zp-owner-v1|' + got);
+    return a === b;
+  } catch (eSK) { return false; }
+}
+
 async function sessionRead(req) {
   try {
     const hit = await caches.default.match(await sessionKeyUrl(req));
@@ -2162,17 +2265,18 @@ async function sessionRead(req) {
           id: typeof j.id === 'string' ? j.id : '',
           em: typeof j.em === 'string' ? j.em : '',
           nm: typeof j.nm === 'string' ? j.nm : '',
+          key: typeof j.key === 'string' ? j.key : '', /* v7.2: the auto-issued slot key */
           ts: j.ts || 0,
         };
       }
     }
   } catch (eR) { /* cache hiccup: act empty */ }
-  return { jar: {}, token: '', role: '', id: '', em: '', nm: '', ts: 0 };
+  return { jar: {}, token: '', role: '', id: '', em: '', nm: '', key: '', ts: 0 };
 }
 
 async function sessionWrite(req, st) {
   try {
-    const body = JSON.stringify({ jar: st.jar, token: st.token, role: st.role, id: st.id, em: st.em || '', nm: st.nm || '', ts: st.ts });
+    const body = JSON.stringify({ jar: st.jar, token: st.token, role: st.role, id: st.id, em: st.em || '', nm: st.nm || '', key: st.key || '', ts: st.ts });
     const toStore = new Response(body, {
       headers: { 'content-type': 'application/json', 'cache-control': 'max-age=2592000' }, /* 30 days */
     });
@@ -2208,12 +2312,21 @@ function sessionEatSetCookies(st, list) {
 
 /* passive capture — the proxy path calls this (waitUntil) for every
  * chat-host response. authsObj = a parsed {token,id,role} auths
- * answer when this response IS one; bearer = the request's Bearer. */
-async function sessionCapture(req, bearer, setCookieList, authsObj) {
+ * answer when this response IS one; bearer = the request's Bearer.
+ * v7.2: opts.claimKey — the proxy path already decided THIS response
+ * claims (or re-issues) the slot; landing it here binds the minted
+ * key to the session in the same write. */
+async function sessionCapture(req, bearer, setCookieList, authsObj, opts) {
   try {
     const st = await sessionRead(req);
     const heldUser = !!(st.role && st.role !== 'guest' && st.id);
     let changed = sessionEatSetCookies(st, setCookieList);
+    /* v7.2: bind the minted key to a slot that has none (a fresh
+     * claim, or adopting a keyless pre-7.2 slot) */
+    if (opts && opts.claimKey && !st.key) {
+      st.key = String(opts.claimKey);
+      changed = true;
+    }
     /* (1) the auths answer is authoritative: a USER session always
      * wins; a GUEST answer never demotes a held user session. */
     if (authsObj && authsObj.token && authsObj.id) {
@@ -2263,15 +2376,30 @@ async function handleSession(req, url, event) {
   if (!sessionRateOk(req)) {
     return json({ ok: false, error: 'too many requests — wait two minutes and try again' }, req, 429);
   }
-  /* v7.1: the owner key gates the whole endpoint. No OWNER_KEY
-   * configured -> the session features are OFF on this worker (a
-   * shareable guest proxy — nobody can read or write a session
-   * here). OWNER_KEY configured -> the key must match. */
-  if (!ownerKeyOf(event)) {
-    return json({ ok: false, mode: 'off', error: 'staying signed in is OFF on this worker — set the OWNER_KEY variable (Settings → Variables) to enable it' }, req, 404);
-  }
-  if (!(await ownerKeyOk(req, event))) {
-    return json({ ok: false, mode: 'keyed', error: 'wrong or missing owner key (x-zp-owner)' }, req, 403);
+  /* v7.1 + v7.2: the gate. OWNER_KEY (the optional master key)
+     configured -> strict keyed mode, exactly v7.1: the master key
+     must match. Otherwise AUTO mode: a slot is LOCKED once it holds
+     a key, a session, or any jar (covers pre-7.2 slots) — then the
+     slot's own key must match. An empty unclaimed slot answers
+     GET keylessly with has:false so the pocket can say "first
+     sign-in locks this relay". */
+  if (ownerKeyOf(event)) {
+    if (!(await ownerKeyOk(req, event))) {
+      return json({ ok: false, mode: 'keyed', error: 'wrong or missing owner key (x-zp-owner)' }, req, 403);
+    }
+  } else {
+    const st = await sessionRead(req);
+    const locked = !!(st.key || st.token || (st.jar && Object.keys(st.jar).length));
+    if (locked && !(await slotKeyOk(req, st))) {
+      if (method === 'GET' || method === 'HEAD') {
+        return json({ ok: false, mode: 'auto', locked: true, error: "this relay keeps someone's sign-in — it answers only to its key" }, req, 403);
+      }
+      return json({ ok: false, mode: 'auto', error: 'locked — this relay answers only to its key' }, req, 403);
+    }
+    if ((method === 'GET' || method === 'HEAD') && !locked) {
+      const jar = Object.keys(st.jar).map((name) => ({ name: name, value: st.jar[name] }));
+      return json({ ok: true, mode: 'auto', unclaimed: true, has: false, savedAt: 0, token: '', role: '', id: '', email: '', name: '', jar: jar }, req);
+    }
   }
   if (method === 'GET' || method === 'HEAD') {
     const st = await sessionRead(req);
@@ -2460,13 +2588,13 @@ async function handle(req, event) {
        * the token key or the upstream host. Neutral JSON: no z.ai
        * strings anywhere in this body. */
       const entry = tokPath(chatUpstream(event) + '/');
-      /* v7.1: session features are ON only when OWNER_KEY is set —
-       * session_mode tells the pocket WHICH state it is in ("keyed"
-       * = bring the owner key; "off" = add the OWNER_KEY variable;
-       * absent = a pre-7.1 open relay, restore still works but the
-       * pocket warns that anyone with the URL can read it). */
-      const okKey = ownerKeyOf(event);
-      return json({ ok: true, name: VERSION, time: new Date().toISOString(), token_required: !!token, token_ok: tokenOk, session: !!okKey, session_mode: okKey ? 'keyed' : 'off', entry: entry }, req);
+      /* v7.2: sessions are ALWAYS on. session_mode says which flavor:
+       * "keyed" = OWNER_KEY (the optional master key) is set — strict
+       * v7.1 behavior; "auto" = the relay locks itself to the first
+       * account that signs in (zero setup — the pocket handles the
+       * rest). Absent session fields entirely = a pre-7.1 open relay. */
+      const masterKey = ownerKeyOf(event);
+      return json({ ok: true, name: VERSION, time: new Date().toISOString(), token_required: !!token, token_ok: tokenOk, session: true, session_mode: masterKey ? 'keyed' : 'auto', entry: entry }, req);
     }
 
     /* ---- neutral favicon: never a proxied page ---- */
@@ -2626,9 +2754,11 @@ async function handle(req, event) {
     const h = new Headers();
     const skipReq = new Set(['host', 'origin', 'referer', 'cookie', 'connection', 'keep-alive', 'upgrade',
       'proxy-connection', 'te', 'trailer', 'transfer-encoding', 'content-length', 'accept-encoding',
-      'x-cookie', 'x-proxy-token', 'x-set-cookie', 'x-zp-owner']);
+      'x-cookie', 'x-proxy-token', 'x-set-cookie', 'x-zp-owner', 'x-zp-claim']);
     /* v7.1: x-zp-owner is this relay's OWN gate header (the owner
-     * key the pocket sends) — it must NEVER ride upstream. */
+     * key the pocket sends) — it must NEVER ride upstream.
+     * v7.2: x-zp-claim (the minted-key RESPONSE header) is likewise
+     * stripped from REQUESTS — it only ever travels worker→client. */
     /* v3: Cloudflare's edge injects its own connection headers
      * (cf-connecting-ip, cf-ipcountry, cf-ray, cf-visitor,
      * x-forwarded-for, cdn-loop, true-client-ip, ...) into every
@@ -2689,15 +2819,34 @@ async function handle(req, event) {
       }
     }
 
-    /* ---- v7.1: does THIS request carry the owner key? --------------
+    /* v7.1 + v7.2: does THIS request carry a key the relay accepts?
      * One evaluation, reused by every session feature below: passive
      * capture, the sticky heal, the 401-recovery assist and the
-     * signout-forget. A request without the key (a stranger holding
-     * the worker URL + a pocket copy) proxies as a plain guest — it
-     * can never read, write, inject or forget the owner's session. */
+     * signout-forget. OWNER_KEY configured (keyed mode): the master
+     * key decides — and a slot key minted by an earlier auto claim
+     * still works on its own slot (the owner set the variable later).
+     * Auto mode: the SLOT's key decides. A request with no valid key
+     * (a stranger holding the worker URL + a pocket copy) proxies as
+     * a plain guest — it can never read, write, inject or forget the
+     * owner's session. */
     let reqOwnerOk = false;
-    if (host === chatHost(event) && ownerKeyOf(event)) {
-      try { reqOwnerOk = await ownerKeyOk(req, event); } catch (eOK) { reqOwnerOk = false; }
+    let reqMasterSet = false;
+    let reqSlotSt = null; /* v7.2: the slot, read once for auto rights */
+    if (host === chatHost(event)) {
+      reqMasterSet = !!ownerKeyOf(event);
+      if (reqMasterSet) {
+        try { reqOwnerOk = await ownerKeyOk(req, event); } catch (eOK) { reqOwnerOk = false; }
+        if (!reqOwnerOk && String(req.headers.get('x-zp-owner') || '').trim()) {
+          /* not the master key — but maybe this slot's own auto key */
+          try {
+            reqSlotSt = await sessionRead(req);
+            reqOwnerOk = await slotKeyOk(req, reqSlotSt);
+          } catch (eSK2) { reqOwnerOk = false; }
+        }
+      } else {
+        try { reqSlotSt = await sessionRead(req); } catch (eSR) { reqSlotSt = null; }
+        try { reqOwnerOk = await slotKeyOk(req, reqSlotSt || {}); } catch (eSK) { reqOwnerOk = false; }
+      }
     }
 
     let res;
@@ -3052,9 +3201,23 @@ async function handle(req, event) {
      * by design — it must not resurrect into the slot).
      * v7.1: capture is OWNER-ONLY (x-zp-owner matched) — a guest or a
      * stranger signing into THEIR account through this relay must
-     * never write (let alone overwrite) the owner's slot. */
+     * never write (let alone overwrite) the owner's slot.
+     * v7.2 AUTO: the auths answer is parsed BEFORE the rights check,
+     * because it IS the rights check — the claim decision must be
+     * made inline (the minted key has to ride THIS response out on
+     * x-zp-claim). Rules, auto mode only (keyed mode is v7.1):
+     *   - carrying the slot's key (or the master key) -> full owner
+     *     rights: capture tokens, jar, rotations, everything;
+     *   - keyless USER answer on an unclaimed slot (no key, no held
+     *     user session) -> CLAIM: mint a key, capture, stamp the key;
+     *   - keyless USER answer for the SAME account as the held
+     *     session (wiped phone, new device) -> capture + re-issue
+     *     the existing key (stamped) — automatic recovery;
+     *   - anything else (keyless guest, keyless foreign account)
+     *     -> no capture, no stamp: a plain guest proxy answer. */
+    let claimStamp = '';
     try {
-      if (host === chatHost(event) && !isSignoutCall && reqOwnerOk) {
+      if (host === chatHost(event) && !isSignoutCall) {
         const scAll = (typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : []).concat(recoveryCookies || []);
         let authsObj = null;
         const authsPlainGet = method === 'GET' && /^\/api\/v1\/auths\/?$/.test(upUrl.pathname);
@@ -3071,10 +3234,35 @@ async function handle(req, event) {
         const authzCap = req.headers.get('authorization') || '';
         const mB = authzCap.match(/^\s*Bearer\s+(\S+)\s*$/i);
         if (mB && mB[1].split('.').length === 3) bearer = mB[1];
-        if (scAll.length || bearer || authsObj) {
-          const pCap = sessionCapture(req, bearer, scAll, authsObj);
+        /* ---- the v7.2 rights + claim decision ---- */
+        let capOk = reqOwnerOk; /* keyed mode (or key-carrying owner): decided above */
+        let claimKey = '';
+        if (!reqMasterSet) {
+          const st = reqSlotSt || await sessionRead(req);
+          const userAo = !!(authsObj && authsObj.token && authsObj.id && String(authsObj.role || '') !== 'guest');
+          if (!reqOwnerOk && userAo) {
+            const hasKey = !!(st && st.key);
+            const heldUser = !!(st && st.role && st.role !== 'guest' && st.id);
+            const sameAcct = !!(st && String(authsObj.id) === String(st.id || ''));
+            if (!hasKey && !heldUser) {
+              /* fresh relay: the first USER sign-in claims it */
+              capOk = true;
+              claimKey = newSlotKey();
+            } else if (sameAcct) {
+              /* the account holder returning keyless (wipe, new
+               * device): re-issue THIS slot's key — existing or new
+               * (a pre-7.2 keyless slot gets adopted + keyed here) */
+              capOk = true;
+              claimKey = (st && st.key) || newSlotKey();
+            }
+            /* else: a foreign account on a live slot — guest only */
+          }
+        }
+        if (capOk && (scAll.length || bearer || authsObj)) {
+          const pCap = sessionCapture(req, bearer, scAll, authsObj, claimKey ? { claimKey: claimKey } : null);
           if (event && typeof event.waitUntil === 'function') { try { event.waitUntil(pCap); } catch (eWu) { pCap.catch(function () { }); } }
           else pCap.catch(function () { });
+          if (claimKey) claimStamp = claimKey;
         }
       }
     } catch (eSC) { /* capture must never break the proxy */ }
@@ -3099,6 +3287,10 @@ async function handle(req, event) {
     maybeSetTokenCookie(req, outHeaders, event);
     outHeaders.set('x-final-url', res.url || upUrl.toString());
     if (retried) outHeaders.set('x-zp-retry', (retried === 'dropauth' || retried === 'capacity' || retried === 'sticky') ? retried : '1');
+    /* v7.2: the minted (or re-issued) slot key rides THIS response to
+     * the client that just signed in — the pocket's runtime patch
+     * reads it, saves it, and rides it from the next request on. */
+    if (claimStamp) outHeaders.set('x-zp-claim', claimStamp);
     const outCt = corsHeaders(req, outHeaders);
 
     if (ct.includes('text/html')) {
@@ -3383,7 +3575,7 @@ function corsHeaders(req, h) {
   h.set('access-control-allow-methods', 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS');
   const reqH = req.headers.get('access-control-request-headers');
   h.set('access-control-allow-headers', reqH || '*');
-  h.set('access-control-expose-headers', 'content-disposition, content-type, x-set-cookie, x-final-url, filename, x-zp-retry, x-zp-jsrw, x-jar-seed');
+  h.set('access-control-expose-headers', 'content-disposition, content-type, x-set-cookie, x-final-url, filename, x-zp-retry, x-zp-jsrw, x-jar-seed, x-zp-claim');
   h.set('access-control-max-age', '86400');
   return h;
 }
