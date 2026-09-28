@@ -1,8 +1,30 @@
+/* ================================================================
+   ================================================================
+    OWNER KEY — OPTIONAL. THIS IS THE ONLY SETTING IN THIS FILE.
+   ================================================================
+   Leave it EMPTY (easiest, recommended): the relay locks itself
+   to the first z.ai account that signs in on it — you stay
+   signed in, and strangers who only have your relay address get
+   a plain guest proxy. Nothing to configure, nothing to type.
+
+   WANT A KEY INSTEAD? Put your secret between the quotes on the
+   OWNER_KEY line just below, then Save & Deploy:
+
+        const OWNER_KEY = "my-secret-key";
+
+   With a key set, the relay hands its saved sign-in ONLY to apps
+   that type the same key once (the OWNER_KEY box on the pocket's
+   main page — tap the ? next to it for help). A Cloudflare
+   variable named OWNER_KEY also still works, but setting it here
+   is easier to find.
+   ================================================================ */
+const OWNER_KEY = "";
+
 /* ============================================================
  * z.ai pocket — Cloudflare Worker relay — worker.js
- * BUILD: zp service 7.2 (the current one-and-only build)
+ * BUILD: zp service 7.3 (the current one-and-only build)
  *   Deploy check: /__status on the worker URL must answer
- *   "zp service 7.2" — if it says 6.0 … 7.1, an old copy is
+ *   "zp service 7.3" — if it says 6.0 … 7.2, an old copy is
  *   still deployed; replace it with this file.
  * ------------------------------------------------------------
  * WHAT THIS DOES (v5 — the "no-navigation" architecture)
@@ -251,30 +273,24 @@
  *        says session:true with session_mode "auto" (default) or
  *        "keyed" (OWNER_KEY set).
  *
- *   v7.2 — AUTO MODE (zero-setup share-safe sessions). The 7.1
- *        fix was right but cost a dashboard trip: set OWNER_KEY by
- *        hand, tell friends to do the same (user: "it's hard for me
- *        to set the owner key... giving it to people they won't
- *        know either"). Now a worker deployed with NO variables at
- *        all locks itself to the first account that signs in on
- *        it: that auths answer CLAIMS the slot — the worker mints
- *        a random 128-bit key, stores it WITH the session, and
- *        hands it to that one device on x-zp-claim (the pocket
- *        saves it like a typed key, silently; the runtime patch
- *        forwards it, and the shell pushes it back into a running
- *        sandbox so capture continues mid-session). A wiped phone
- *        or new device signs in again — same account, keyless —
- *        and the worker RE-ISSUES the key automatically. Anyone
- *        else holding the URL (no key, different account) still
- *        gets a plain guest proxy: no read, no claim, no refresh,
- *        no forget. A pre-7.2 slot counts as claimed by its held
- *        account, so only the same account can adopt it.
- *        OWNER_KEY remains fully supported as an optional MASTER
- *        key: set it and the relay runs strict keyed mode (exactly
- *        7.1 — nothing is ever auto-claimed); set it later and it
- *        also unlocks an auto-claimed slot. /__status now always
- *        says session:true with session_mode "auto" (default) or
- *        "keyed" (OWNER_KEY set).
+ *   v7.3 — DOWNLOADS THAT SAVE + THE KEY YOU CAN FIND. (1) THE
+ *        OWNER KEY MOVED: it is a const at the VERY TOP of this
+ *        file now — set it right there, or leave it empty for auto
+ *        mode; the dashboard variable still works but is no longer
+ *        the way (user: "the reason I don't like it is I can't find
+ *        it in the worker file"). The pocket's main page grows a ?
+ *        button next to the key box that explains what it is and
+ *        exactly how to set it. (2) THE DOWNLOAD BRIDGE: an
+ *        <a download> click inside the sandbox never reaches the
+ *        locked frame's download plumbing again (mobile webviews
+ *        kill it — the app reported "Download failed") — the
+ *        runtime patch swallows the click, fetches the bytes
+ *        through the relay (jar + owner key ride as on every
+ *        call), and hands the Blob to the shell, which saves it
+ *        from the file:// page with the phone's NATIVE save flow.
+ *        The shell's loader additionally sniffs every navigation
+ *        answer: content-disposition: attachment (or a clearly
+ *        binary content-type) is saved, never painted.
  *
  *   v7.1 — THE OWNER KEY (share-safe sessions). 7.0's session
  *        slot was OPEN: anyone holding the worker URL could GET
@@ -350,8 +366,8 @@
  *
  *   DEPLOY — that's it, no step 4 anymore: sign in once through
  *        the app and the relay locks to that account. (Optional:
- *        Settings → Variables → OWNER_KEY switches the relay to
- *        strict keyed mode instead — v7.1 behavior.)
+ *        the OWNER_KEY const at the very top of this file switches
+ *        the relay to strict keyed mode instead — v7.1 behavior.)
  *
  * DEPLOY (you already have a worker)
  *   1. dash.cloudflare.com → Workers & Pages → your worker
@@ -359,10 +375,10 @@
  *   3. Save & Deploy
  *   4. NOTHING — no variables needed. Open the app, sign in once,
  *      and this relay locks itself to that account (the key is
- *      minted, stored and delivered automatically). Optional:
- *      OWNER_KEY = a long random string switches to strict keyed
- *      mode instead; PROXY_TOKEN, and/or EXTRA_HOSTS="a.com,b.com"
- *      to allowlist more hosts.
+ *      minted, stored and delivered automatically). Optional: set
+ *      OWNER_KEY at the very top of this file for strict keyed
+ *      mode; PROXY_TOKEN, and/or EXTRA_HOSTS="a.com,b.com" to
+ *      allowlist more hosts.
  *   5. Save the new zai-pocket.html on the phone and use its
  *      "Open Z.ai (sandboxed)" button — the app streams into the
  *      file through this worker. Do NOT open the worker URL in *      the browser; it is only a relay now.
@@ -417,7 +433,7 @@
  *     upstream (hygiene for 6.8-era leftovers).
  * ============================================================ */
 
-const VERSION = 'zp service 7.2';
+const VERSION = 'zp service 7.3';
 
 /* z.ai first-party family (suffix match — covers subdomains) */
 const ALLOW = [
@@ -1440,6 +1456,77 @@ const PATCH_JS = [
 "    } catch (e) { return stubWindow(); }",
 "  };",
 "",
+"  /* ---------- v7.3: the download bridge --------------------------------",
+"   * An <a download> click inside the locked sandbox can never rely on",
+"   * the frame's own download plumbing - mobile webviews and null-origin",
+"   * iframes kill it, and the app then reports \"Download failed\". So",
+"   * the click is swallowed here, the bytes are fetched THROUGH the",
+"   * relay (jar + owner key ride exactly like on every other call), and",
+"   * the finished Blob is handed to the pocket shell, which saves it",
+"   * from the file:// page with the phone's native save flow. Covers",
+"   * blob:, data: and any relay-mappable http(s) destination; a plain",
+"   * navigation that answers content-disposition: attachment is caught",
+"   * by the shell's loader sniff instead. */",
+"  function dlNameFrom(u, mime) {",
+"    try {",
+"      var s = String(u || '');",
+"      var m = s.match(/[/?#]([^/?#]+)(?:[?#].*)?$/);",
+"      var n = m ? m[1] : '';",
+"      try { n = decodeURIComponent(n); } catch (eDC) { /* keep raw */ }",
+"      if (n && /\\.[a-z0-9]{1,8}$/i.test(n)) return n;",
+"      var ext = (String(mime || '').split('/')[1] || '').split(';')[0];",
+"      return (n || 'download') + (ext ? '.' + ext : '');",
+"    } catch (e) { return 'download'; }",
+"  }",
+"  function bridgeDownload(href, name) {",
+"    var url = String(href || '');",
+"    var nm = String(name || '').trim();",
+"    if (nm === 'true' || nm === 'false') nm = '';",
+"    var dest = url;",
+"    try { if (!/^(data|blob):/i.test(url)) dest = mapUrl(url); } catch (eM) { dest = url; }",
+"    up({ type: 'dlbegin', name: nm || dlNameFrom(url, '') });",
+"    try {",
+"      window.fetch(dest).then(function (r) {",
+"        if (!r || !r.ok) throw new Error('HTTP ' + (r && r.status));",
+"        var cdf = '';",
+"        try {",
+"          var cd = r.headers.get('content-disposition') || '';",
+"          var mm = cd.match(/filename[*]?=((?:\"([^\"]+)\")|([^;\\s]+))/i) || [];",
+"          cdf = (mm[2] || mm[3] || '').replace(/^UTF-8''/i, '');",
+"          try { cdf = decodeURIComponent(cdf); } catch (eD2) { /* keep raw */ }",
+"        } catch (eH) { /* ignore */ }",
+"        return r.blob().then(function (b) {",
+"          up({ type: 'dl', name: nm || cdf || dlNameFrom(url, b.type), mime: b.type || '', blob: b });",
+"        });",
+"      }, function (eN) {",
+"        up({ type: 'dlerr', name: nm || dlNameFrom(url, ''), why: 'the relay did not answer' });",
+"      }).catch(function (eC) {",
+"        up({ type: 'dlerr', name: nm || dlNameFrom(url, ''), why: String((eC && eC.message) || eC).slice(0, 80) });",
+"      });",
+"    } catch (eS) {",
+"      up({ type: 'dlerr', name: nm || 'download', why: 'blocked before it started' });",
+"    }",
+"  }",
+"  if (SD) {",
+"    /* v7.3: capture-phase download tap - registered BEFORE the nav",
+"     * capture below so an <a download> never becomes a sandbox",
+"     * navigation; preventDefault also makes the nav capture bail. */",
+"    document.addEventListener('click', function (e) {",
+"      try {",
+"        if (e.button !== undefined && e.button !== 0) return;",
+"        var t = e.target;",
+"        var a = t && t.closest ? t.closest('a[download]') : null;",
+"        if (!a) return;",
+"        var href = a.getAttribute('href') || '';",
+"        if (!href || href.charAt(0) === '#' || /^javascript:/i.test(href)) return;",
+"        e.preventDefault();",
+"        e.stopPropagation();",
+"        try { e.stopImmediatePropagation(); } catch (eSI) { /* ignore */ }",
+"        bridgeDownload(href, a.getAttribute('download') || '');",
+"      } catch (eDL) { /* the bridge must never break a click */ }",
+"    }, true);",
+"  }",
+"",
 "  /* ---------- click / submit capture (fallback layer) ---------- */",
 "  document.addEventListener('click', function (e) {",
 "    try {",
@@ -2188,21 +2275,22 @@ async function sessionKeyUrl(req) {
   return origin + '/__session/' + (await sha256Hex(TOK_KEY + '|zp-session-v1'));
 }
 
-/* ---- v7.1: the OWNER KEY gate ---------------------------------------
- * The Workers variable OWNER_KEY (any long secret, set in the
- * Cloudflare dashboard) is what makes the session features
- * PRIVATE to the owner. Every session operation — GET/DELETE
- * /__session, passive capture, sticky injection, the 401-recovery
- * assist, and the signout-forget — requires the request to carry
- * x-zp-owner: <the same key>. Comparisons are SHA-256 on both
- * sides (never a raw string compare), and the header is stripped
- * before anything is forwarded upstream (see skipReq). A worker
- * with NO OWNER_KEY simply runs its session features OFF: the
- * relay works as a plain shareable guest proxy, and /__status
- * says so — the safe default for a fresh deploy. */
+/* ---- v7.1/v7.3: the OWNER KEY gate ----------------------------------
+ * The OWNER_KEY (any long secret) is what makes the session
+ * features PRIVATE to one owner. Since v7.3 it is set as the
+ * const at the VERY TOP of this file (the dashboard variables
+ * OWNER_KEY / ZP_OWNER_KEY still work as a fallback). Every
+ * session operation — GET/DELETE /__session, passive capture,
+ * sticky injection, the 401-recovery assist, and the
+ * signout-forget — requires the request to carry x-zp-owner:
+ * <the same key>. Comparisons are SHA-256 on both sides (never a
+ * raw string compare), and the header is stripped before anything
+ * is forwarded upstream (see skipReq). A worker with NO owner key
+ * runs in AUTO mode: the relay locks itself to the first account
+ * that signs in (see the v7.2 history above). */
 function ownerKeyOf(event) {
   const env = envOf(event) || {};
-  return String(env.OWNER_KEY || env.ZP_OWNER_KEY || '').trim();
+  return String(OWNER_KEY || env.OWNER_KEY || env.ZP_OWNER_KEY || '').trim();
 }
 async function ownerKeyOk(req, event) {
   const want = ownerKeyOf(event);
