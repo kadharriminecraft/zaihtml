@@ -25,9 +25,9 @@ const OWNER_KEY = "Jesusisthebom";
 
 /* ============================================================
  * z.ai pocket — Cloudflare Worker relay — worker.js
- * BUILD: zp service 7.4 (the current one-and-only build)
+ * BUILD: zp service 7.5 (the current one-and-only build)
  *   Deploy check: /__status on the worker URL must answer
- *   "zp service 7.4" — if it says 6.0 … 7.3, an old copy is
+ *   "zp service 7.5" — if it says 6.0 … 7.4, an old copy is
  *   still deployed; replace it with this file.
  * ------------------------------------------------------------
  * WHAT THIS DOES (v5 — the "no-navigation" architecture)
@@ -295,6 +295,47 @@ const OWNER_KEY = "Jesusisthebom";
  *        answer: content-disposition: attachment (or a clearly
  *        binary content-type) is saved, never painted.
  *
+ *   v7.5 — UI PERSISTENCE + THE WARM CACHE (the "it remembers"
+ *        round). (1) UI PERSISTENCE: the login survives reopen
+ *        because the relay holds it — but the site's UI state
+ *        (dark mode = localStorage.theme, the model-recommendation
+ *        popup dismissal = modelRecommendTime/lastCancelTime/
+ *        shouldSuggestModel, settings, locale, selectedModels …)
+ *        lived ONLY in the sandbox localStorage shim, which rides
+ *        the pocket file's own localStorage — and phones that wipe
+ *        that between opens (the exact reason the sign-in moved to
+ *        the relay) reset the theme and resurrect the popup EVERY
+ *        open. The session slot now carries a strictly-bounded
+ *        `ui` map alongside the jar: PUT /__session {ui:{…}}
+ *        merges it (48 keys / 4 KB a value / 24 KB total, token
+ *        never stored, null deletes), GET hands it back, and the
+ *        pocket merges it into the boot seed — so dark mode and
+ *        dismissed popups survive exactly like the sign-in. Never
+ *        allowed on an unclaimed relay (UI state must not claim
+ *        the slot — only a sign-in does). (1b) THE ALWAYS-SHIM: a
+ *        sandbox whose NATIVE localStorage is usable used to keep
+ *        the site's UI writes in per-paint ephemeral native storage
+ *        — the shell never saw them, so the relay copy never
+ *        updated and theme + popup reset every open while the
+ *        sign-in (seed-borne) kept working. The runtime patch now
+ *        routes localStorage/sessionStorage through the shell-backed
+ *        shim whenever a shell is present (top-level mode keeps
+ *        native), snapshotting a usable native localStorage into
+ *        the shim first so no earlier write is lost. (2) THE WARM
+ *        CACHE:
+ *        first load through the relay pays full price (z.ai's
+ *        ~3 MB bundle); after that it should feel like a warm
+ *        browser. Fingerprinted static assets (js/css/fonts/
+ *        images) are edge-cached under /__ac/<sha> keys on THIS
+ *        origin (same Cache API the session slot uses — put()
+ *        only accepts same-zone keys), stored ALREADY REWRITTEN
+ *        (the css/js worker-path mappings are deterministic per
+ *        upstream URL + token key, and the key hash mixes TOK_KEY
+ *        so a re-keyed worker never serves stale rewrites),
+ *        self-expiring after 7 days via the stored x-zp-ts stamp.
+ *        HTML, API answers and anything authenticated is NEVER
+ *        cached. Hits answer with fresh per-caller CORS headers.
+ *
  *   v7.4 — THE SEED SCRIPT + THE FULL LOCK + THE HONEST STATUS.
  *        (1) THE SEED: window.name does NOT survive into Chrome's
  *        null-origin sandbox frames (verified live: name=EMPTY
@@ -474,7 +515,7 @@ const OWNER_KEY = "Jesusisthebom";
  *     upstream (hygiene for 6.8-era leftovers).
  * ============================================================ */
 
-const VERSION = 'zp service 7.4';
+const VERSION = 'zp service 7.5';
 
 /* z.ai first-party family (suffix match — covers subdomains) */
 const ALLOW = [
@@ -2124,10 +2165,33 @@ const PATCH_JS = [
 "        });",
 "      } catch (ePx) { return target; } /* engine without Proxy: method-only fallback */",
 "    }",
+"    /* v7.5: ALWAYS route the site's storage through the shell when",
+"      one is above us. A sandbox whose NATIVE storage is usable (some",
+"      phones' file viewers) would otherwise keep every UI write \u2014",
+"      dark mode, the model-recommendation popup dismissal \u2014 in",
+"      per-paint ephemeral native storage: the shell never sees the",
+"      write, the relay-held UI copy never updates, and the theme and",
+"      the popup reset on every single open (the reported bug \u2014 while",
+"      the sign-in kept working, because it rides the seed). Top-level",
+"      mode (no shell above) keeps native storage when it works, and a",
+"      usable native localStorage is snapshotted into the shim first",
+"      so nothing the site saved earlier in this origin is lost. */",
+"    var hasShell = false;",
+"    try { hasShell = !!(window.parent && window.parent !== window); } catch (ePar) { hasShell = false; }",
 "    ['localStorage', 'sessionStorage'].forEach(function (name) {",
 "      var native = null;",
 "      try { native = window[name]; } catch (eAcc) { native = null; }",
-"      if (native && usable(native)) return; /* native storage works \u2014 keep it */",
+"      var nativeOk = false;",
+"      try { nativeOk = !!(native && usable(native)); } catch (eUs2) { nativeOk = false; }",
+"      if (nativeOk && !hasShell) return; /* top-level mode: native storage works \u2014 keep it */",
+"      if (nativeOk && name === 'localStorage') {",
+"        try {",
+"          for (var i0 = 0; i0 < native.length; i0++) {",
+"            var k0 = native.key(i0);",
+"            if (k0 && !(k0 in lsMirror)) { try { lsMirror[k0] = String(native.getItem(k0)); } catch (eG0) { /* ignore */ } }",
+"          }",
+"        } catch (eSnap) { /* ignore */ }",
+"      }",
 "      try {",
 "        Object.defineProperty(window, name, { value: makeShim(name), configurable: true, writable: false });",
 "      } catch (eDef) { /* ignore */ }",
@@ -2296,7 +2360,7 @@ const PATCH_JS = [
  * ============================================================ */
 
 const sessionHits = new Map(); /* ip -> {n, t} — /__session ops in the window */
-const SESSION_EMPTY = { jar: {}, token: '', role: '', id: '', em: '', nm: '', key: '', stale: 0, ts: 0 };
+const SESSION_EMPTY = { jar: {}, token: '', role: '', id: '', em: '', nm: '', key: '', stale: 0, ts: 0, ui: {} };
 
 async function sha256Hex(str) {
   const dig = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
@@ -2420,21 +2484,67 @@ async function sessionRead(req) {
           key: typeof j.key === 'string' ? j.key : '', /* v7.2: the auto-issued slot key */
           stale: j.stale || 0, /* v7.4: the held sign-in died upstream — honest status */
           ts: j.ts || 0,
+          ui: (j.ui && typeof j.ui === 'object' && !Array.isArray(j.ui)) ? j.ui : {}, /* v7.5: the site's UI localStorage (theme, popup dismissal…) */
         };
       }
     }
   } catch (eR) { /* cache hiccup: act empty */ }
-  return { jar: {}, token: '', role: '', id: '', em: '', nm: '', key: '', stale: 0, ts: 0 };
+  return { jar: {}, token: '', role: '', id: '', em: '', nm: '', key: '', stale: 0, ts: 0, ui: {} };
 }
 
 async function sessionWrite(req, st) {
   try {
-    const body = JSON.stringify({ jar: st.jar, token: st.token, role: st.role, id: st.id, em: st.em || '', nm: st.nm || '', key: st.key || '', stale: st.stale || 0, ts: st.ts });
+    const body = JSON.stringify({ jar: st.jar, token: st.token, role: st.role, id: st.id, em: st.em || '', nm: st.nm || '', key: st.key || '', stale: st.stale || 0, ts: st.ts, ui: (st.ui && typeof st.ui === 'object' && !Array.isArray(st.ui)) ? st.ui : {} });
     const toStore = new Response(body, {
       headers: { 'content-type': 'application/json', 'cache-control': 'max-age=2592000' }, /* 30 days */
     });
     await caches.default.put(new Request(await sessionKeyUrl(req), { method: 'GET' }), toStore);
   } catch (eP) { /* cache refused — nothing we can do; the next capture retries */ }
+}
+
+/* ---- v7.5: static asset edge cache ------------------------------------
+ * "First load slow, then lightning" — the browser-cache behavior,
+ * server-side. Fingerprinted static assets (js/css/fonts/images —
+ * names like index-BEIsjDOv.js are immutable per content) fetched
+ * through the relay are stored in the Cloudflare edge cache under
+ * /__ac/<sha> keys on THIS origin (cache.put only accepts same-zone
+ * keys — the exact machinery /__session uses) ALREADY REWRITTEN:
+ * the css/js worker-path mappings are deterministic per upstream
+ * URL + token key, and the key hash mixes TOK_KEY so a re-keyed
+ * worker never serves stale rewrites. HTML, API answers and
+ * anything authenticated is NEVER cached; entries self-expire
+ * after 7 days via the stored x-zp-ts stamp; hits get fresh
+ * per-caller CORS headers (corsHeaders echoes the caller's own
+ * origin, so a stored copy must never carry a previous caller's).
+ * ------------------------------------------------------------------ */
+const ASSET_TTL_MS = 7 * 24 * 3600 * 1000;
+const ASSET_MAX_BYTES = 8 * 1024 * 1024;
+const ASSET_EXT = /\.(?:js|mjs|css|map|woff2?|ttf|otf|eot|png|jpe?g|gif|svg|webp|avif|ico|bmp|mp3|m4a|aac|wav|ogg|mp4|webm|wasm)$/i;
+function assetCacheableKind(upUrl) {
+  try {
+    if (!upUrl || !upUrl.pathname) return false;
+    return ASSET_EXT.test(upUrl.pathname);
+  } catch (e) { return false; }
+}
+async function assetCacheKeyUrl(req, upUrl) {
+  const origin = new URL(req.url).origin;
+  return origin + '/__ac/' + (await sha256Hex('zp-asset-v1|' + String(TOK_KEY || '') + '|' + upUrl.toString()));
+}
+/* the headers a stored copy carries: everything that breaks put()
+ * (set-cookie), varies per caller (access-control-*), or lies after
+ * the CF decode (content-encoding/length) is stripped; the fresh
+ * x-zp-ts stamp is the TTL clock. */
+function assetStoreHeaders(h) {
+  const out = new Headers();
+  h.forEach((v, k) => {
+    const lk = k.toLowerCase();
+    if (lk === 'set-cookie' || lk === 'vary' || lk === 'content-encoding' || lk === 'content-length' ||
+        lk === 'transfer-encoding' || lk === 'te' || lk === 'connection' || lk === 'keep-alive' ||
+        lk.indexOf('access-control-') === 0 || lk === 'x-zp-ts') return;
+    out.set(k, v);
+  });
+  out.set('x-zp-ts', String(Date.now()));
+  return out;
 }
 
 /* set-cookie array -> jar merge: an empty value or a past expiry REMOVES */
@@ -2546,8 +2656,9 @@ async function sessionCapture(req, bearer, setCookieList, authsObj, opts) {
   } catch (eS) { /* capture must never break the proxy */ }
 }
 
-/* the endpoint: GET / DELETE (POST is intentionally absent — the
- * capture path is the only writer; the pocket never uploads) */
+/* the endpoint: GET (read) / PUT (v7.5: merge the UI-state map) /
+ * DELETE (forget). The session itself is written ONLY by the
+ * passive capture path — PUT touches the ui map alone. */
 async function handleSession(req, url, event) {
   const method = req.method.toUpperCase();
   if (!sessionRateOk(req)) {
@@ -2575,7 +2686,7 @@ async function handleSession(req, url, event) {
     }
     if ((method === 'GET' || method === 'HEAD') && !locked) {
       const jar = Object.keys(st.jar).map((name) => ({ name: name, value: st.jar[name] }));
-      return json({ ok: true, mode: 'auto', unclaimed: true, has: false, savedAt: 0, token: '', role: '', id: '', email: '', name: '', jar: jar }, req);
+      return json({ ok: true, mode: 'auto', unclaimed: true, has: false, savedAt: 0, token: '', role: '', id: '', email: '', name: '', jar: jar, ui: {} }, req);
     }
   }
   if (method === 'GET' || method === 'HEAD') {
@@ -2596,8 +2707,51 @@ async function handleSession(req, url, event) {
     return json({
       ok: true, has: has, savedAt: st.ts || 0, token: st.token || '',
       role: st.role || '', id: st.id || '', email: st.em || '', name: st.nm || '',
-      stale: !!st.stale, jar: jar,
+      stale: !!st.stale, jar: jar, ui: st.ui || {},
     }, req);
+  }
+  if (method === 'PUT' || method === 'POST') {
+    /* ---- v7.5: the UI-state half of the held session ----------------
+     * The pocket pushes the site's localStorage UI keys here whenever
+     * they change (theme, the model-recommendation popup dismissal,
+     * settings, locale, selectedModels …) and pulls them back in the
+     * GET — so a phone whose viewer wipes file:// storage between
+     * opens keeps dark mode and its dismissed popups, exactly like
+     * the sign-in itself. Strictly bounded: plain string map, the
+     * token is never stored, 48 keys / 4 KB a value / 24 KB total,
+     * a null value deletes its key. The gate above already ran: a
+     * keyed relay needs the master key, a locked auto relay needs
+     * the slot key. An UNLOCKED auto relay must refuse — writing UI
+     * state can never claim a slot (only a sign-in does). */
+    if (!ownerKeyOf(event)) {
+      const stP = await sessionRead(req);
+      const lockedP = !!(stP.key || stP.token || (stP.jar && Object.keys(stP.jar).length));
+      if (!lockedP) {
+        return json({ ok: false, error: 'no session held here yet — sign in once and the UI state rides it' }, req, 403);
+      }
+    }
+    let body = null;
+    try { body = await req.json(); } catch (eJ) { body = null; }
+    const ui = (body && typeof body === 'object' && body.ui && typeof body.ui === 'object' && !Array.isArray(body.ui)) ? body.ui : null;
+    if (!ui) return json({ ok: false, error: 'body must be {ui:{...}}' }, req, 400);
+    const st = await sessionRead(req);
+    if (!st.ui || typeof st.ui !== 'object') st.ui = {};
+    let n = 0, total = 0;
+    Object.keys(st.ui).forEach((k) => { total += k.length + String(st.ui[k]).length; });
+    Object.keys(ui).forEach((k) => {
+      const kk = String(k).slice(0, 64);
+      if (!kk || kk === 'token' || kk.indexOf('__') === 0 || kk.indexOf('zp') === 0) return;
+      if (ui[k] === null) { if (kk in st.ui) { total -= kk.length + String(st.ui[kk]).length; delete st.ui[kk]; } return; }
+      const v = String(ui[k]);
+      if (v.length > 4096) return;
+      if (kk in st.ui) total -= kk.length + String(st.ui[kk]).length;
+      if (total + kk.length + v.length > 24576 || Object.keys(st.ui).length >= 48) return;
+      st.ui[kk] = v;
+      total += kk.length + v.length;
+      n++;
+    });
+    await sessionWrite(req, st);
+    return json({ ok: true, keys: Object.keys(st.ui).length, stored: n }, req);
   }
   if (method === 'DELETE') {
     /* v7.0: a real sign-out — kill the session UPSTREAM too, so the
@@ -2611,7 +2765,7 @@ async function handleSession(req, url, event) {
     try { await caches.default.delete(await sessionKeyUrl(req)); } catch (eD) { /* idempotent */ }
     return json({ ok: true, note: 'session forgotten' }, req);
   }
-  return json({ ok: false, error: 'use GET or DELETE' }, req, 405);
+  return json({ ok: false, error: 'use GET, PUT or DELETE' }, req, 405);
 }
 
 /* v7.0: background session refresher — one auths GET with the held
@@ -3084,6 +3238,63 @@ async function handle(req, event) {
         else pForget.catch(function () { });
       } catch (eFo) { /* best effort */ }
     }
+    /* ---- v7.5: static asset edge cache — lookup -----------------------
+     * (see the block comment at assetCacheableKind). Only GET + a
+     * cacheable static extension; a fresh hit answers straight from
+     * the edge with per-caller CORS headers and x-zp-cache: hit. An
+     * expired entry is deleted and the request falls through to the
+     * upstream fetch, which re-stores a fresh copy below. */
+    let acKey = null;
+    if (method === 'GET' && assetCacheableKind(upUrl)) {
+      try {
+        acKey = await assetCacheKeyUrl(req, upUrl);
+        const hit = await caches.default.match(acKey);
+        if (hit) {
+          const ts = parseInt(hit.headers.get('x-zp-ts') || '0', 10) || 0;
+          if (ts && (Date.now() - ts) < ASSET_TTL_MS) {
+            const hh = new Headers();
+            hit.headers.forEach((v, k) => {
+              const lk = k.toLowerCase();
+              if (lk === 'set-cookie' || lk === 'x-zp-ts' || lk === 'content-encoding' || lk === 'content-length' ||
+                  lk === 'vary' || lk === 'transfer-encoding' || lk.indexOf('access-control-') === 0) return;
+              hh.set(k, v);
+            });
+            hh.set('x-zp-cache', 'hit');
+            hh.set('cache-control', 'no-store');
+            return new Response(hit.body, { status: 200, headers: corsHeaders(req, hh) });
+          }
+          try { await caches.default.delete(acKey); } catch (eDel) { /* ignore */ }
+        }
+      } catch (eAC) { acKey = null; /* the cache must never break the proxy */ }
+    }
+    /* store a FINAL rewritten text body (css/js) — status 200 only,
+     * never text/html (an error page with a .js name must not stick) */
+    function acStoreText(txt, outHeaders) {
+      if (!acKey || !res || res.status !== 200) return;
+      try {
+        if (!txt || txt.length > ASSET_MAX_BYTES) return;
+        const ctS = (res.headers.get('content-type') || '').toLowerCase();
+        if (ctS.includes('text/html')) return;
+        const keep = new Response(txt, { headers: assetStoreHeaders(outHeaders) });
+        const p = caches.default.put(new Request(acKey, { method: 'GET' }), keep);
+        if (event && typeof event.waitUntil === 'function') { try { event.waitUntil(p); } catch (eWS) { p.catch(function () { }); } }
+        else p.catch(function () { });
+      } catch (eST) { /* ignore */ }
+    }
+    /* store a passthrough (binary) body from a clone of the stream */
+    function acStoreStream(outHeaders) {
+      if (!acKey || !res || res.status !== 200) return;
+      try {
+        const ctS = (res.headers.get('content-type') || '').toLowerCase();
+        if (ctS.includes('text/html') || ctS.includes('text/event-stream')) return;
+        const cl = parseInt(res.headers.get('content-length') || '0', 10) || 0;
+        if (cl && cl > ASSET_MAX_BYTES) return;
+        const keep = new Response(res.clone().body, { headers: assetStoreHeaders(outHeaders) });
+        const p = caches.default.put(new Request(acKey, { method: 'GET' }), keep);
+        if (event && typeof event.waitUntil === 'function') { try { event.waitUntil(p); } catch (eWS2) { p.catch(function () { }); } }
+        else p.catch(function () { });
+      } catch (eSS) { /* ignore */ }
+    }
     try {
       const fetchInit = { method: method, headers: h, redirect: 'manual' };
       if (body !== undefined) fetchInit.body = body;
@@ -3552,6 +3763,7 @@ async function handle(req, event) {
     if (ct.includes('text/css')) {
       const text = await res.text();
       const css = rewriteCss(text, pfx, host, allowList(event), tokMode ? upUrl.toString() : null, new URL(req.url).origin);
+      acStoreText(css, outCt); /* v7.5: warm cache — the rewritten css is deterministic per upstream URL */
       return new Response(css, { status: res.status, headers: outCt });
     }
     /* ---- v5: JavaScript location-assignment rewrite ----------------
@@ -3573,8 +3785,10 @@ async function handle(req, event) {
       if (js !== text) {
         const h2 = new Headers(outCt);
         h2.set('x-zp-jsrw', '1');
+        acStoreText(js, h2); /* v7.5: warm cache — store the REWRITTEN bytes */
         return new Response(js, { status: res.status, headers: h2 });
       }
+      acStoreText(text, outCt);
       return new Response(text, { status: res.status, headers: outCt });
     }
 
@@ -3589,6 +3803,7 @@ async function handle(req, event) {
       outHeaders.set('cache-control', 'no-store');
     }
 
+    acStoreStream(outCt); /* v7.5: warm cache — images/fonts/other static bytes (never html/sse/api — the extension gate plus these content-type checks decide) */
     return new Response(res.body, { status: res.status, headers: outCt });
   } catch (err) {
     return json({ error: 'proxy error', detail: String(err && err.message || err) }, req, 500);
@@ -3790,7 +4005,7 @@ function corsHeaders(req, h) {
   h.set('access-control-allow-methods', 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS');
   const reqH = req.headers.get('access-control-request-headers');
   h.set('access-control-allow-headers', reqH || '*');
-  h.set('access-control-expose-headers', 'content-disposition, content-type, x-set-cookie, x-final-url, filename, x-zp-retry, x-zp-jsrw, x-jar-seed, x-zp-claim');
+  h.set('access-control-expose-headers', 'content-disposition, content-type, x-set-cookie, x-final-url, filename, x-zp-retry, x-zp-jsrw, x-jar-seed, x-zp-claim, x-zp-cache');
   h.set('access-control-max-age', '86400');
   return h;
 }
