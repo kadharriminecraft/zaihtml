@@ -73,6 +73,14 @@ border:1px solid var(--line);color:var(--txt);font:12.5px/1.4 ui-monospace,SFMon
 #keyModal ol{margin:10px 0 0;padding-left:20px;font-size:13.5px;color:var(--sub)}
 #keyModal li{margin:7px 0;line-height:1.5}
 #keyModal code{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:1px 6px;font:12px ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all}
+/* ---- v7.6: the save sheet (a download arrived without a live tap) ---- */
+#saveSheet{position:fixed;inset:0;z-index:70;display:none;align-items:flex-end;justify-content:center;background:rgba(6,8,12,.66);padding:14px}
+#saveSheet.on{display:flex}
+#saveSheet .ssCard{background:var(--panel);border:1px solid var(--line);border-radius:18px;max-width:440px;width:100%;padding:18px;box-shadow:0 18px 48px rgba(0,0,0,.5);margin-bottom:calc(var(--sab) + 10px)}
+#saveSheet h3{margin:0 0 2px;font-size:16.5px}
+#saveSheet p{margin:10px 0 0;font-size:13.5px;line-height:1.55;color:var(--sub)}
+#saveSheet p b{color:var(--txt)}
+#saveSheet .ssName{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all}
 /* ---- v7.2: share card ---- */
 .meta{font-size:12px;color:var(--sub);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
 margin-top:10px;word-break:break-all;line-height:1.6}
@@ -271,7 +279,23 @@ body.locked{overflow:hidden}
  * (3) THE HONEST STATUS: /__session now reports stale when the
  * saved sign-in died upstream — the status row says "expired,
  * sign in again" instead of claiming an email that no longer
- * applies. */
+ * applies.
+ *
+ * v7.6: THE NATIVE SAVE-AS (no worker change — pocket only).
+ * Downloads were being dropped silently: the blob-anchor click is
+ * an "automatic download" when it is not attached to a live tap,
+ * and phones block those from a file page with no permission UI
+ * to unblock — the toast said "check your downloads" while
+ * nothing arrived. Every save now chains: showSaveFilePicker (the
+ * OS save dialog: pick the folder AND the name, every time) ->
+ * navigator.share with files (the share sheet — "Save to Files"
+ * where the picker does not exist, e.g. iPhone Safari) -> the old
+ * anchor click (last resort). The picker and the share both need a
+ * LIVE tap; downloads arriving from the sandbox carry none, so
+ * they stop in the SAVE SHEET (a small bottom card): one tap on
+ * Save is a fresh gesture and the OS dialog opens. Save worker.js
+ * taps are live, so its dialog opens directly. Queued downloads
+ * wait in the sheet ("N more waiting"), Skip drops just one file. */
 #avStage{padding-bottom:env(safe-area-inset-bottom,0px)}
 </style>
 </head>
@@ -287,7 +311,7 @@ body.locked{overflow:hidden}
   <div class="card hero">
     <div class="pill"><span class="dot" id="dot"></span><span id="stTxt">checking your worker&hellip;</span><span class="v" id="stVer"></span></div>
     <button class="btn" id="btnOpen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></svg>Open Z.ai in this file</button>
-    <div class="hint">Everything streams quietly through the relay below. For sending, the model picker, the security slider, automatic busy-model retry, <b>staying signed in</b>, <b>in-app downloads</b> and <b>locked-key relays</b>, use <b>zp service 7.4 or newer</b> &mdash; the relay locks itself to your sign-in, and downloaded files save through your phone's own save flow. Nothing to configure.</div>
+    <div class="hint">Everything streams quietly through the relay below. For sending, the model picker, the security slider, automatic busy-model retry, <b>staying signed in</b>, <b>in-app downloads</b> and <b>locked-key relays</b>, use <b>zp service 7.4 or newer</b> &mdash; the relay locks itself to your sign-in, and every download opens your phone's <b>Save-As picker</b> &mdash; you pick the folder each time. Nothing to configure.</div>
   </div>
 
   <div class="card">
@@ -330,7 +354,7 @@ body.locked{overflow:hidden}
     <div class="shareNote">Anyone holding <b>your worker URL + this file</b> gets a plain guest proxy &mdash; your relay stays locked to your account, and a wiped phone just signs in again (same account = automatic take-back).</div>
   </div>
 
-  <div class="foot">zai-pocket.html &middot; sandboxed v7.5 &middot; boots signed in from the seed script &middot; locked relays answer only to their key &middot; downloads save natively &middot; shareable</div>
+  <div class="foot">zai-pocket.html &middot; sandboxed v7.6 &middot; boots signed in from the seed script &middot; locked relays answer only to their key &middot; downloads open the Save-As picker &middot; shareable</div>
 
 </div>
 
@@ -375,6 +399,20 @@ body.locked{overflow:hidden}
     </ol>
     <p>People you share this app with deploy their own worker &mdash; they can leave the key empty (easiest, that's the default) or set their own the exact same way.</p>
     <div class="row" style="margin-top:14px"><button class="btn" id="btnKeyClose">Got it</button></div>
+  </div>
+</div>
+
+<!-- v7.6: the save sheet — a download arrived from the app without a
+     live tap on this page, and the native Save-As dialog requires one.
+     One tap on Save opens the OS dialog: folder + name, every time. -->
+<div id="saveSheet" aria-hidden="true">
+  <div class="ssCard">
+    <h3>Choose where to save</h3>
+    <p><b class="ssName" id="ssName">file</b> <span id="ssSize"></span> is ready.</p>
+    <p>Your phone asks where every file goes now. Tap <b>Save</b> and pick the folder in the dialog that opens.</p>
+    <p id="ssQueue" hidden></p>
+    <div class="row" style="margin-top:14px"><button class="btn" id="btnSaveNow">Save &#8230;</button></div>
+    <div class="row" style="margin-top:8px"><button class="btn ghost" id="btnSaveSkip">Skip this file</button></div>
   </div>
 </div>
 
@@ -1030,19 +1068,123 @@ body.locked{overflow:hidden}
       return (n || 'download') + (ext ? '.' + ext : '');
     } catch (e) { return 'download'; }
   }
-  /* v7.4: ONE native-save path for everything (Save worker.js + the
-   * sandbox download bridge): a real blob anchor click from this
-   * file:// page — the phone's own save flow takes it from there. */
-  function saveBlob(blob, name) {
-    var n = String(name || 'download').replace(/[\\/:*?"<>|]/g, '').trim() || 'download';
+  /* v7.6: NATIVE SAVE-AS for every download. The old blob-anchor
+   * click could be dropped silently by phones that block "automatic
+   * downloads" from a file page — the toast said "check your
+   * downloads" and nothing ever arrived. The chain now:
+   *   1. showSaveFilePicker — the OS save dialog: pick the folder and
+   *      the name, EVERY time (Chrome / Edge).
+   *   2. navigator.share with files — the share sheet ("Save to
+   *      Files" where there is no picker: iPhone Safari).
+   *   3. the old blob anchor click — last resort, browsers with
+   *      neither.
+   * The picker and the share both demand a LIVE tap on this page. A
+   * download that arrives from the sandbox (the bridge, or a
+   * navigation that turned out to be a file) carries no tap the
+   * dialog will accept, so it stops in the SAVE SHEET: one tap on
+   * Save is a fresh gesture and the OS dialog opens. A file is never
+   * lost to a silent block again. */
+  function cleanDlName(name) {
+    return String(name || 'download').replace(/[\\/:*?"<>|]/g, '').trim() || 'download';
+  }
+  function dlSize(n) {
+    try {
+      n = Number(n) || 0;
+      if (n >= 1048576) return (n / 1048576).toFixed(1) + ' MB';
+      if (n >= 1024) return Math.round(n / 1024) + ' KB';
+      return n + ' B';
+    } catch (eS) { return ''; }
+  }
+  function anchorSave(blob, name) {
     var url = URL.createObjectURL(blob);
     var a = document.createElement('a');
     a.href = url;
-    a.download = n;
+    a.download = name;
     document.body.appendChild(a);
     a.click();
     setTimeout(function () { try { a.remove(); URL.revokeObjectURL(url); } catch (eR) { /* ignore */ } }, 5000);
+    toast('Saving ' + name + ' \u2014 check your Downloads.');
   }
+  /* One save attempt. Resolves 'saved' | 'cancelled' | 'sheet' (the
+   * OS dialog needs a fresh tap) | 'fallback' (no native path on this
+   * browser at all). */
+  function attemptSave(blob, name) {
+    return new Promise(function (resolve) {
+      if (window.showSaveFilePicker) {
+        window.showSaveFilePicker({ suggestedName: name }).then(function (h) {
+          return h.createWritable().then(function (w) {
+            return w.write(blob).then(function () { return w.close(); });
+          }).then(function () { resolve('saved'); })
+            .catch(function () { resolve('sheet'); }); /* picked, write failed — retry once more */
+        }).catch(function (err) {
+          var nm = String((err && err.name) || '');
+          if (nm === 'AbortError') resolve('cancelled');
+          else resolve('sheet'); /* SecurityError: no live tap — the sheet re-arms one */
+        });
+        return;
+      }
+      var f = null;
+      try { f = new File([blob], name, { type: (blob && blob.type) || 'application/octet-stream' }); }
+      catch (eF) { f = null; }
+      if (f && navigator.canShare && navigator.canShare({ files: [f] })) {
+        navigator.share({ files: [f] }).then(function () { resolve('saved'); }, function (err) {
+          var nmS = String((err && err.name) || '');
+          if (nmS === 'AbortError') resolve('cancelled');
+          else resolve('sheet');
+        });
+        return;
+      }
+      resolve('fallback');
+    });
+  }
+  var SAVEQ = [];      /* downloads waiting for the save sheet */
+  var SAVE_CUR = null; /* the download currently shown in the sheet */
+  function saveSheetRender() {
+    if (!SAVE_CUR) return;
+    el('ssName').textContent = SAVE_CUR.name;
+    try { el('ssSize').textContent = dlSize(SAVE_CUR.blob.size); } catch (eSz) { /* ignore */ }
+    var more = SAVEQ.length;
+    var q = el('ssQueue');
+    q.hidden = !more;
+    q.textContent = more ? more + ' more file' + (more > 1 ? 's' : '') + ' waiting after this one.' : '';
+  }
+  function saveSheetPump() {
+    if (!SAVE_CUR) SAVE_CUR = SAVEQ.shift() || null;
+    var m = el('saveSheet');
+    if (SAVE_CUR) { saveSheetRender(); m.classList.add('on'); }
+    else { m.classList.remove('on'); }
+  }
+  function saveBlob(blob, name) {
+    var n = cleanDlName(name);
+    attemptSave(blob, n).then(function (r) {
+      if (r === 'saved') { toast('Saved ' + n + ' \u2014 you chose the place.'); return; }
+      if (r === 'cancelled') { toast('Save cancelled \u2014 nothing was written.'); return; }
+      if (r === 'fallback') { anchorSave(blob, n); return; }
+      SAVEQ.push({ blob: blob, name: n });
+      saveSheetPump();
+    });
+  }
+  /* the sheet's own buttons — a fresh tap each, so the OS dialog
+   * always opens from here */
+  el('btnSaveNow').addEventListener('click', function () {
+    var job = SAVE_CUR;
+    if (!job) { saveSheetPump(); return; }
+    attemptSave(job.blob, job.name).then(function (r) {
+      SAVE_CUR = null;
+      if (r === 'cancelled') toast('Save cancelled \u2014 nothing was written.');
+      else if (r === 'fallback') anchorSave(job.blob, job.name);
+      else if (r === 'saved') toast('Saved ' + job.name + ' \u2014 you chose the place.');
+      /* 'sheet' twice with a live tap — the browser is refusing the
+       * dialog outright; the old path so the file is not lost */
+      else anchorSave(job.blob, job.name);
+      saveSheetPump();
+    });
+  });
+  el('btnSaveSkip').addEventListener('click', function () {
+    if (SAVE_CUR) toast('Skipped ' + SAVE_CUR.name + ' \u2014 not saved.');
+    SAVE_CUR = null;
+    saveSheetPump();
+  });
   function diagRows() {
     var out = '';
     for (var i = 0; i < LAST_DIAG.length; i++) {
@@ -1207,8 +1349,9 @@ body.locked{overflow:hidden}
         try { fnD = decodeURIComponent(fnD); } catch (eFN) { /* keep raw */ }
         res.blob().then(function (b) {
           var nmD2 = fnD || dlNameFromPath(entry.up || path, b.type);
+          /* v7.6: saveBlob owns the whole save flow now (the OS
+           * Save-As dialog, or the save sheet when the tap is spent) */
           saveBlob(b, nmD2);
-          toast('Saving ' + nmD2 + ' \u2014 check your downloads.');
         }, function () { toast('Download failed \u2014 could not read the file from the relay.'); });
         /* this entry was never a page — take it back off the stack */
         if (push) { NAV.stack.pop(); NAV.idx = NAV.stack.length - 1; }
@@ -1384,13 +1527,13 @@ body.locked{overflow:hidden}
         toast('Downloading ' + (d.name || 'file') + ' \u2014 one moment\u2026');
         break;
       case 'dl':
-        /* v7.4: the download bridge delivered the bytes — save them
-         * from THIS file:// page so the phone's own native save flow
-         * runs (the same one Save worker.js uses). */
+        /* v7.4: the download bridge delivered the bytes. v7.6:
+         * saveBlob runs the native Save-As flow from THIS page (the
+         * OS dialog directly when a tap is live, else the save
+         * sheet — one tap and the dialog opens). */
         try {
           if (d.blob) {
             saveBlob(d.blob, d.name || 'download');
-            toast('Saving ' + (d.name || 'file') + ' \u2014 check your downloads.');
             break;
           }
         } catch (eDl) { /* fall through to the honest failure */ }
@@ -1590,9 +1733,10 @@ body.locked{overflow:hidden}
 
   el('btnSaveWorker').addEventListener('click', function () {
     if (!WEMB) { toast('This copy carries no worker code — get a fresh file.'); return; }
+    /* v7.6: this tap is live, so the OS Save-As dialog opens straight
+     * away — no sheet in between */
     try {
       saveBlob(new Blob([WEMB.src], { type: 'text/javascript' }), 'worker.js');
-      toast('Saving worker.js — check your downloads.');
     } catch (eD) {
       toast('Save blocked — use Copy instead.');
     }
